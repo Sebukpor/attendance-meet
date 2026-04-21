@@ -5,11 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>MLAVS Attendance Verification</title>
   <link rel="stylesheet" href="styles.css" />
-  <!-- ✅ FIX 1: Official face-api.js build -->
-  
-  <script defer src="config.js"></script>
-  <script defer src="app.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.14/dist/face-api.min.js"></script>
+  <!-- ✅ FIX 1: Official face-api.js build - Load BEFORE app scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.14/dist/face-api.min.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
 </head>
 <body>
   <div class="app-shell">
