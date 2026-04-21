@@ -1,8 +1,10 @@
 import asyncio
+import hashlib
 import json
 import logging
 import math
 import os
+import secrets
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -65,6 +67,8 @@ class EnrollRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     user_id: str = Field(..., min_length=3, max_length=128)
     full_name: str = Field(..., min_length=2, max_length=200)
+    email: str = Field(..., min_length=5, max_length=254)
+    password: str = Field(..., min_length=6, max_length=128)
     captures: list[EnrollmentCapture] = Field(
         ..., min_length=MIN_ENROLLMENT_IMAGES, max_length=MAX_ENROLLMENT_IMAGES
     )
@@ -74,6 +78,7 @@ class EnrollRequest(BaseModel):
 class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     user_id: str = Field(..., min_length=3, max_length=128)
+    password: str | None = Field(default=None, min_length=6, max_length=128)
 
 
 class StartSessionRequest(BaseModel):
@@ -289,18 +294,30 @@ async def fetch_user_from_store(user_id: str) -> UserRecord | None:
     return user
 
 
+def hash_password(password: str) -> tuple[str, str]:
+    """Hash a password with a random salt using SHA-256."""
+    salt = secrets.token_hex(16)
+    salted = f"{salt}{password}"
+    password_hash = hashlib.sha256(salted.encode()).hexdigest()
+    return password_hash, salt
+
+
 async def upsert_user_in_store(payload: EnrollRequest, average_quality_score: float) -> dict[str, Any]:
+    password_hash, password_salt = hash_password(payload.password)
     request_body = {
         "action": "upsert_user",
         "drive_folder_id": DRIVE_FOLDER_ID,
         "user": {
             "user_id": payload.user_id,
             "full_name": payload.full_name,
+            "email": payload.email,
             "active": True,
             "average_quality_score": round(average_quality_score, 4),
             "capture_count": len(payload.captures),
             "metadata": payload.metadata,
             "embeddings": [capture.embedding.values for capture in payload.captures],
+            "password_hash": password_hash,
+            "password_salt": password_salt,
         },
     }
     result = await gs_post(request_body)
@@ -392,6 +409,13 @@ async def enroll_user(payload: EnrollRequest, background_tasks: BackgroundTasks)
     }
 
 
+def verify_password(password: str, password_hash: str, password_salt: str) -> bool:
+    """Verify a password against its hash and salt."""
+    salted = f"{password_salt}{password}"
+    computed_hash = hashlib.sha256(salted.encode()).hexdigest()
+    return secrets.compare_digest(computed_hash, password_hash)
+
+
 @app.post(f"{API_PREFIX}/login")
 async def login_user(payload: LoginRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
     require_persistence_config()
@@ -399,11 +423,20 @@ async def login_user(payload: LoginRequest, background_tasks: BackgroundTasks) -
     if not user or not user.active:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found or inactive.")
 
+    if payload.password:
+        password_hash = getattr(user, "password_hash", "")
+        password_salt = getattr(user, "password_salt", "")
+        if not password_hash or not password_salt:
+            logger.warning("User %s has no password stored; allowing login without password verification.", payload.user_id)
+        elif not verify_password(payload.password, password_hash, password_salt):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid password.")
+
     dispatch_gs_event(
         "login_lookup",
         {
             "user_id": user.user_id,
             "full_name": user.full_name,
+            "email": getattr(user, "email", ""),
             "embedding_file_id": user.embedding_file_id,
         },
         background_tasks,
@@ -413,6 +446,7 @@ async def login_user(payload: LoginRequest, background_tasks: BackgroundTasks) -
         "message": "User is eligible to start attendance verification.",
         "user_id": user.user_id,
         "full_name": user.full_name,
+        "email": getattr(user, "email", ""),
         "enrolled_embeddings": len(user.embeddings),
         "average_quality_score": round(user.average_quality_score, 4),
         "embedding_file_id": user.embedding_file_id,

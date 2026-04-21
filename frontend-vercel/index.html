@@ -35,10 +35,6 @@
           </div>
           <form id="enrollmentForm" class="stack">
             <label>
-              User ID
-              <input id="enrollUserId" name="userId" type="text" required />
-            </label>
-            <label>
               Full Name
               <input id="enrollFullName" name="fullName" type="text" required />
             </label>
@@ -48,13 +44,21 @@
             </label>
             <label>
               Password
-              <input id="enrollPassword" name="password" type="password" required />
+              <input id="enrollPassword" name="password" type="password" required minlength="6" />
             </label>
             <button type="button" id="startEnrollmentBtn" class="primary">Start enrollment</button>
-            <p id="enrollmentPrompt" class="muted">We’ll guide you through front, left, right, up, and down poses.</p>
+            <p id="enrollmentPrompt" class="muted">We'll guide you through front, left, right, up, and down poses.</p>
             <div class="progress-row">
               <progress id="enrollmentProgress" max="5" value="0"></progress>
               <span id="enrollmentCount">0 / 5</span>
+            </div>
+            <div id="generatedUserIdCard" class="result-card hidden">
+              <h3>Your User ID</h3>
+              <p class="muted">Copy this ID to use for login:</p>
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <code id="generatedUserId" style="flex: 1; background: rgba(15, 23, 42, 0.8); padding: 8px; border-radius: 8px; word-break: break-all;"></code>
+                <button type="button" id="copyUserIdBtn" style="width: auto; padding: 8px 12px;">Copy</button>
+              </div>
             </div>
           </form>
         </section>

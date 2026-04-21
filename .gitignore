@@ -2,61 +2,45 @@
 # Dependencies
 node_modules/
 
-# Build artifacts
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.ENV
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# Build outputs
 dist/
 build/
-coverage/
-htmlcov/
+*.egg-info/
 
-# Environment variables
+# Logs
+*.log
+
+# Environment
 .env
 .env.local
 .env.*
 
-# Editor/IDE files
+# Editors
 .vscode/
 .idea/
 *.swp
 *.swo
 *.tmp
 
-# Logs
-*.log
-
-# Python specific
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-*.so
-*.egg-info/
-.eggs/
-
-# Coverage reports
-.coverage
-coverage.xml
-
-# Distribution / packaging
-*.tar.gz
-*.whl
-*.egg
-
-# Pytest cache
-.pytest_cache/
-
-# MyPy cache
-.mypy_cache/
-
-# VS Code specific
-.vscode/tasks.json
-.vscode/launch.json
-
-# OS generated files
+# OS
 .DS_Store
 Thumbs.db
 
-# Temporary files
-*.tmp
-*~
+# Coverage
+coverage/
+htmlcov/
 ```

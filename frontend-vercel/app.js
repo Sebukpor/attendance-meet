@@ -46,13 +46,15 @@ const elements = {
   resultCard: document.getElementById("resultCard"),
   toast: document.getElementById("toast"),
   cameraHint: document.getElementById("cameraHint"),
-  enrollUserId: document.getElementById("enrollUserId"),
   enrollFullName: document.getElementById("enrollFullName"),
   enrollEmail: document.getElementById("enrollEmail"),
   enrollPassword: document.getElementById("enrollPassword"),
   loginUserId: document.getElementById("loginUserId"),
   meetingUrl: document.getElementById("meetingUrl"),
   meetingTitle: document.getElementById("meetingTitle"),
+  generatedUserIdCard: document.getElementById("generatedUserIdCard"),
+  generatedUserId: document.getElementById("generatedUserId"),
+  copyUserIdBtn: document.getElementById("copyUserIdBtn"),
 };
 
 async function boot() {
@@ -70,6 +72,7 @@ function bindUI() {
   elements.loginBtn.addEventListener("click", handleLoginStatus);
   elements.startAttendanceBtn.addEventListener("click", handleAttendanceStart);
   elements.endSessionBtn.addEventListener("click", () => endSession("user"));
+  elements.copyUserIdBtn.addEventListener("click", copyGeneratedUserId);
 
   ["mousemove", "keydown", "click", "scroll"].forEach((eventName) => {
     window.addEventListener(
@@ -181,14 +184,15 @@ async function handleLoginStatus() {
 }
 
 async function handleEnrollmentFlow() {
-  const userId = elements.enrollUserId.value.trim();
   const fullName = elements.enrollFullName.value.trim();
   const email = elements.enrollEmail.value.trim();
   const password = elements.enrollPassword.value.trim();
-  if (!userId || !fullName || !email || !password) {
-    showToast("Provide user ID, full name, email, and password before enrollment.", true);
+  if (!fullName || !email || !password) {
+    showToast("Provide full name, email, and password before enrollment.", true);
     return;
   }
+
+  const generatedUserId = `user_${Date.now()}_${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 
   try {
     await ensureCamera();
@@ -221,7 +225,7 @@ async function handleEnrollmentFlow() {
     const response = await request("/enroll", {
       method: "POST",
       body: JSON.stringify({
-        user_id: userId,
+        user_id: generatedUserId,
         full_name: fullName,
         email: email,
         password: password,
@@ -234,11 +238,14 @@ async function handleEnrollmentFlow() {
     });
 
     elements.enrollmentPrompt.textContent = `Enrollment complete with quality score ${response.average_quality_score}.`;
+    elements.generatedUserId.textContent = generatedUserId;
+    elements.generatedUserIdCard.classList.remove("hidden");
     renderResult({
       title: "Enrollment complete",
       status: "Success",
       body: `Stored ${response.capture_count} reference embeddings for ${response.user_id}.`,
     });
+    showToast("User ID generated! Copy it for future logins.");
   } catch (error) {
     handleError(error);
     elements.enrollmentPrompt.textContent = "Enrollment failed. Improve lighting and keep one face centered in frame.";
@@ -569,6 +576,19 @@ function showToast(message, isError = false) {
 function handleError(error) {
   console.error(error);
   showToast(error.message || "Something went wrong.", true);
+}
+
+function copyGeneratedUserId() {
+  const userId = elements.generatedUserId.textContent;
+  if (!userId) {
+    showToast("No user ID to copy.", true);
+    return;
+  }
+  navigator.clipboard.writeText(userId).then(() => {
+    showToast("User ID copied to clipboard!");
+  }).catch(() => {
+    showToast("Failed to copy. Please select and copy manually.", true);
+  });
 }
 
 function wait(ms) {
