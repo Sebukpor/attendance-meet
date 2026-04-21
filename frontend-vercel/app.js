@@ -477,14 +477,14 @@ async function loadModelsIfNeeded() {
   if (modelsLoaded) return;
   
   // Wait for faceapi library to be fully loaded
-  if (typeof faceapi === 'undefined' || !faceapi.nets) {
+  if (typeof faceapi === 'undefined') {
     console.log('Waiting for faceapi library...');
     await new Promise((resolve, reject) => {
       let attempts = 0;
       const maxAttempts = 50; // 5 seconds total
       const check = setInterval(() => {
         attempts++;
-        if (typeof faceapi !== 'undefined' && faceapi.nets) {
+        if (typeof faceapi !== 'undefined') {
           clearInterval(check);
           resolve();
         } else if (attempts >= maxAttempts) {
@@ -499,10 +499,11 @@ async function loadModelsIfNeeded() {
     const modelBase = window.MLAVS_CONFIG.modelBase;
     console.log('Loading models from:', modelBase);
     
+    // Use the vladmandic face-api fork's API (no .nets namespace)
     await Promise.all([
-      faceapi.nets.ssdMobilenetv1.loadFromUri(modelBase),
-      faceapi.nets.faceLandmark68.loadFromUri(modelBase),
-      faceapi.nets.faceRecognitionNet.loadFromUri(modelBase)
+      faceapi.ssdMobilenetv1.loadFromUri(modelBase),
+      faceapi.faceLandmark68Net.loadFromUri(modelBase),
+      faceapi.faceRecognitionNet.loadFromUri(modelBase)
     ]);
     
     modelsLoaded = true;
@@ -546,10 +547,15 @@ function init() {
 
   elements.startAttendanceBtn.disabled = true;
 
-  // Non-blocking model preload
-  loadModelsIfNeeded().catch(err => {
-    console.warn('Model preload failed (will retry on first use):', err.message);
-  });
+  // Non-blocking model preload with better error handling
+  (async () => {
+    try {
+      await loadModelsIfNeeded();
+      console.log('✓ Models preloaded successfully');
+    } catch (err) {
+      console.warn('Model preload failed (will retry on first use):', err.message);
+    }
+  })();
 
   checkHealth();
   console.log('MLAVS initialized');
