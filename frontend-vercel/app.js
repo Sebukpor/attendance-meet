@@ -482,12 +482,12 @@
   async function loadModelsIfNeeded() {
     if (modelsLoaded) return;
 
-    // Wait for faceapi to be available
-    if (typeof faceapi === 'undefined') {
+    // Wait for faceapi to be fully available (including nets)
+    if (typeof faceapi === 'undefined' || !faceapi.nets) {
       console.log('Waiting for faceapi library to load...');
       await new Promise((resolve) => {
         const checkInterval = setInterval(() => {
-          if (typeof faceapi !== 'undefined') {
+          if (typeof faceapi !== 'undefined' && faceapi.nets) {
             clearInterval(checkInterval);
             resolve();
           }
