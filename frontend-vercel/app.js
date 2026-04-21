@@ -3,15 +3,14 @@
 'use strict';
 
 // State
-let modelsLoaded = false;
 let videoStream = null;
-let enrollmentDescriptors = [];
 let enrollmentStep = 1;
 let currentPoseIndex = 0;
 let retryCount = 0;
 const MAX_RETRIES = 5;
 let sessionId = null;
 let monitoringInterval = null;
+const MIN_ENROLLMENT_IMAGES = 3;
 
 // DOM Elements
 const elements = {};
@@ -34,7 +33,7 @@ function cacheElements() {
   elements.generatedUserId = document.getElementById('generatedUserId');
   elements.copyUserIdBtn = document.getElementById('copyUserIdBtn');
 
-  // ✅ FIX 3: Separate video/canvas elements for enrollment vs attendance
+  // Separate video/canvas elements for enrollment vs attendance
   elements.enrollVideo = document.getElementById('enrollVideo');
   elements.enrollOverlay = document.getElementById('enrollOverlay');
   elements.attendanceVideo = document.getElementById('attendanceVideo');
@@ -87,7 +86,6 @@ function setButtonState(button, loading, text) {
 }
 
 // Camera Functions
-// ✅ FIX 3: Accept target video element so enrollment & attendance don't collide
 async function startCamera(videoEl) {
   try {
     if (videoStream) {
@@ -118,33 +116,26 @@ function stopCamera() {
   }
 }
 
-// Face Detection Functions
-// ✅ FIX 3: Accept target video element
-async function captureFaceDescriptor(videoEl) {
-  if (!modelsLoaded) {
-    throw new Error('Models not loaded yet');
-  }
-  const detections = await faceapi.detectSingleFace(videoEl, new faceapi.SsdMobilenetv1Options()).withFaceLandmarks().withFaceDescriptor();
-
-  if (!detections) {
-    throw new Error('No face detected. Make sure one face is centered and well lit.');
-  }
-
-  return detections.descriptor;
-}
-
-// ✅ FIX 3: Accept target video element
-async function waitForFace(videoEl, maxAttempts = 30) {
-  for (let i = 0; i < maxAttempts; i++) {
+// Capture image from video as Blob
+function captureImageFromVideo(videoEl) {
+  return new Promise((resolve, reject) => {
     try {
-      const descriptor = await captureFaceDescriptor(videoEl);
-      return descriptor;
+      const canvas = document.createElement('canvas');
+      canvas.width = videoEl.videoWidth || 640;
+      canvas.height = videoEl.videoHeight || 480;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob((blob) => {
+        if (blob) {
+          resolve(blob);
+        } else {
+          reject(new Error('Failed to capture image'));
+        }
+      }, 'image/jpeg', 0.85);
     } catch (err) {
-      if (i === maxAttempts - 1) throw err;
-      await new Promise(resolve => setTimeout(resolve, 200));
+      reject(err);
     }
-  }
-  throw new Error('No face detected after waiting');
+  });
 }
 
 // Enrollment Flow
@@ -175,9 +166,8 @@ async function handleProceedToCamera() {
   elements.cameraHint.textContent = 'Position your face in the center. Good lighting helps.';
 
   try {
-    // ✅ FIX 3: Pass enrollment video element
     await startCamera(elements.enrollVideo);
-    await loadModelsIfNeeded();
+    // No model loading needed - backend handles face processing
   } catch (err) {
     showToast('Failed to initialize camera', true);
     goToStep(1);
@@ -202,9 +192,9 @@ async function handleStartEnrollment() {
   const email = elements.enrollEmail.value.trim();
   const password = elements.enrollPassword.value.trim();
   
-  enrollmentDescriptors = [];
   currentPoseIndex = 0;
   retryCount = 0;
+  const capturedImages = [];
 
   const poses = [
     'Look straight at the camera',
@@ -225,9 +215,10 @@ async function handleStartEnrollment() {
       elements.enrollmentPrompt.textContent = `Pose ${currentPoseIndex + 1}/5: ${poses[currentPoseIndex]}`;
       
       try {
-        // ✅ FIX 3: Pass enrollment video element
-        const descriptor = await waitForFace(elements.enrollVideo, 50);
-        enrollmentDescriptors.push(Array.from(descriptor));
+        // Wait for user to position face, then capture
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        const blob = await captureImageFromVideo(elements.enrollVideo);
+        capturedImages.push(blob);
         currentPoseIndex++;
         retryCount = 0;
         
@@ -238,7 +229,7 @@ async function handleStartEnrollment() {
         await new Promise(resolve => setTimeout(resolve, 800));
       } catch (err) {
         retryCount++;
-        console.warn(`Face detection failed (attempt ${retryCount}/${MAX_RETRIES}):`, err.message);
+        console.warn(`Image capture failed (attempt ${retryCount}/${MAX_RETRIES}):`, err.message);
         
         if (retryCount >= MAX_RETRIES) {
           showToast(`Failed to capture pose ${currentPoseIndex + 1} after ${MAX_RETRIES} attempts. Please try again.`, true);
@@ -253,10 +244,14 @@ async function handleStartEnrollment() {
       }
     }
 
-    await completeEnrollment(fullName, email, password);
+    await completeEnrollment(fullName, email, password, capturedImages);
     
   } catch (err) {
     console.error('Enrollment error:', err);
+    showToast(err.message, true);
+    elements.startEnrollmentBtn.classList.remove('hidden');
+  }
+}
     showToast(err.message, true);
     elements.startEnrollmentBtn.classList.remove('hidden');
   }
@@ -267,9 +262,14 @@ async function handleRetryEnrollment() {
   retryCount = 0;
   
   try {
-    // ✅ FIX 3: Pass enrollment video element
-    const descriptor = await waitForFace(elements.enrollVideo, 50);
-    enrollmentDescriptors[currentPoseIndex] = Array.from(descriptor);
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    const blob = await captureImageFromVideo(elements.enrollVideo);
+    
+    // Store for later use - we need to track captured images globally
+    if (!window.capturedImagesForEnrollment) {
+      window.capturedImagesForEnrollment = [];
+    }
+    window.capturedImagesForEnrollment[currentPoseIndex] = blob;
     currentPoseIndex++;
     
     elements.enrollmentProgress.value = currentPoseIndex;
@@ -280,7 +280,7 @@ async function handleRetryEnrollment() {
       const fullName = elements.enrollFullName.value.trim();
       const email = elements.enrollEmail.value.trim();
       const password = elements.enrollPassword.value.trim();
-      await completeEnrollment(fullName, email, password);
+      await completeEnrollment(fullName, email, password, window.capturedImagesForEnrollment.filter(Boolean));
     } else {
       elements.startEnrollmentBtn.classList.remove('hidden');
     }
@@ -290,30 +290,32 @@ async function handleRetryEnrollment() {
   }
 }
 
-async function completeEnrollment(fullName, email, password) {
+async function completeEnrollment(fullName, email, password, capturedImages) {
   const userId = generateUserId();
-  const hashedPassword = await hashPassword(password);
-  const salt = Math.random().toString(36).substring(2, 15);
   
   elements.enrollmentPrompt.textContent = 'Saving your enrollment...';
 
   try {
+    // Create FormData for multipart upload
+    const formData = new FormData();
+    formData.append('user_id', userId);
+    formData.append('full_name', fullName);
+    formData.append('email', email);
+    formData.append('password', password);
+    
+    // Append each captured image
+    capturedImages.forEach((blob, index) => {
+      formData.append(`image${index + 1}`, blob, `capture_${index + 1}.jpg`);
+    });
+
     const response = await fetch(`${window.MLAVS_CONFIG.apiBase}/enroll`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userId,
-        fullName,
-        email,
-        password: hashedPassword,
-        salt,
-        descriptors: enrollmentDescriptors
-      })
+      body: formData
     });
 
     if (!response.ok) {
       const errorData = await response.json();
-      throw new Error(errorData.error || 'Enrollment failed');
+      throw new Error(errorData.detail || errorData.error || 'Enrollment failed');
     }
 
     stopCamera();
@@ -382,52 +384,40 @@ async function handleStartAttendance() {
   setButtonState(elements.startAttendanceBtn, true, 'Verifying...');
 
   try {
-    // ✅ FIX 3: Pass attendance video element
     await startCamera(elements.attendanceVideo);
-    await loadModelsIfNeeded();
+    
+    // Wait a moment for camera to stabilize, then capture image
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    const blob = await captureImageFromVideo(elements.attendanceVideo);
 
     elements.enrollmentPrompt.textContent = 'Verifying your identity...';
-    // ✅ FIX 3: Pass attendance video element
-    const descriptor = await waitForFace(elements.attendanceVideo, 50);
 
-    const response = await fetch(`${window.MLAVS_CONFIG.apiBase}/verify`, {
+    // Create FormData for multipart upload
+    const formData = new FormData();
+    formData.append('user_id', userId);
+    formData.append('meeting_url', meetingUrl);
+    if (meetingTitle) {
+      formData.append('meeting_title', meetingTitle);
+    }
+    formData.append('image', blob, 'verification.jpg');
+
+    const response = await fetch(`${window.MLAVS_CONFIG.apiBase}/start`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userId,
-        descriptor: Array.from(descriptor)
-      })
+      body: formData
     });
 
     if (!response.ok) {
       const errorData = await response.json();
-      throw new Error(errorData.error || 'Verification failed');
+      throw new Error(errorData.detail?.message || errorData.error || 'Verification failed');
     }
 
-    const verifyData = await response.json();
-    
-    const sessionResponse = await fetch(`${window.MLAVS_CONFIG.apiBase}/sessions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userId,
-        meetingUrl,
-        meetingTitle,
-        confidence: verifyData.confidence
-      })
-    });
-
-    if (!sessionResponse.ok) {
-      throw new Error('Failed to start session');
-    }
-
-    const sessionData = await sessionResponse.json();
-    sessionId = sessionData.sessionId;
+    const sessionData = await response.json();
+    sessionId = sessionData.session_id;
 
     elements.sessionBadge.textContent = 'Active';
     elements.sessionBadge.classList.remove('muted-badge');
     elements.sessionIdValue.textContent = sessionId;
-    elements.identityValue.textContent = `${Math.round(verifyData.confidence * 100)}%`;
+    elements.identityValue.textContent = `${Math.round(sessionData.identity_confidence * 100)}%`;
     elements.focusValue.textContent = '-';
     elements.interactionValue.textContent = '0';
     elements.endSessionBtn.disabled = false;
