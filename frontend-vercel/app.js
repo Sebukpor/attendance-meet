@@ -48,6 +48,8 @@ const elements = {
   cameraHint: document.getElementById("cameraHint"),
   enrollUserId: document.getElementById("enrollUserId"),
   enrollFullName: document.getElementById("enrollFullName"),
+  enrollEmail: document.getElementById("enrollEmail"),
+  enrollPassword: document.getElementById("enrollPassword"),
   loginUserId: document.getElementById("loginUserId"),
   meetingUrl: document.getElementById("meetingUrl"),
   meetingTitle: document.getElementById("meetingTitle"),
@@ -131,6 +133,20 @@ async function ensureCamera() {
     audio: false,
   });
   elements.video.srcObject = state.stream;
+  
+  // Wait for video to be ready and playing
+  await new Promise((resolve) => {
+    if (elements.video.readyState >= 2) {
+      resolve();
+    } else {
+      elements.video.addEventListener("canplay", resolve, { once: true });
+      elements.video.addEventListener("loadeddata", resolve, { once: true });
+    }
+  });
+  
+  // Give the video a moment to stabilize
+  await wait(500);
+  
   elements.cameraHint.textContent = "Camera ready. Embeddings are generated in-browser only.";
   return state.stream;
 }
@@ -167,8 +183,10 @@ async function handleLoginStatus() {
 async function handleEnrollmentFlow() {
   const userId = elements.enrollUserId.value.trim();
   const fullName = elements.enrollFullName.value.trim();
-  if (!userId || !fullName) {
-    showToast("Provide both user ID and full name before enrollment.", true);
+  const email = elements.enrollEmail.value.trim();
+  const password = elements.enrollPassword.value.trim();
+  if (!userId || !fullName || !email || !password) {
+    showToast("Provide user ID, full name, email, and password before enrollment.", true);
     return;
   }
 
@@ -205,6 +223,8 @@ async function handleEnrollmentFlow() {
       body: JSON.stringify({
         user_id: userId,
         full_name: fullName,
+        email: email,
+        password: password,
         captures: state.enrollmentCaptures,
         metadata: {
           user_agent: navigator.userAgent,
@@ -270,6 +290,24 @@ async function handleAttendanceStart() {
 async function captureFaceDescriptor() {
   if (!state.modelsLoaded) {
     throw new Error("Face models are not loaded yet.");
+  }
+
+  // Ensure video is playing before attempting detection
+  if (elements.video.readyState < 2 || elements.video.paused) {
+    await new Promise((resolve) => {
+      const onReady = () => {
+        elements.video.removeEventListener("canplay", onReady);
+        elements.video.removeEventListener("playing", onReady);
+        resolve();
+      };
+      if (elements.video.readyState >= 2 && !elements.video.paused) {
+        resolve();
+      } else {
+        elements.video.addEventListener("canplay", onReady, { once: true });
+        elements.video.addEventListener("playing", onReady, { once: true });
+      }
+    });
+    await wait(300);
   }
 
   let lastDetection = null;
