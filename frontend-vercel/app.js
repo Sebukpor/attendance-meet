@@ -33,8 +33,13 @@ function cacheElements() {
   elements.generatedUserIdCard = document.getElementById('generatedUserIdCard');
   elements.generatedUserId = document.getElementById('generatedUserId');
   elements.copyUserIdBtn = document.getElementById('copyUserIdBtn');
-  elements.video = document.getElementById('video');
-  elements.overlay = document.getElementById('overlay');
+
+  // ✅ FIX 3: Separate video/canvas elements for enrollment vs attendance
+  elements.enrollVideo = document.getElementById('enrollVideo');
+  elements.enrollOverlay = document.getElementById('enrollOverlay');
+  elements.attendanceVideo = document.getElementById('attendanceVideo');
+  elements.attendanceOverlay = document.getElementById('attendanceOverlay');
+
   elements.cameraHint = document.getElementById('cameraHint');
   elements.loginUserId = document.getElementById('loginUserId');
   elements.meetingUrl = document.getElementById('meetingUrl');
@@ -49,7 +54,6 @@ function cacheElements() {
   elements.identityValue = document.getElementById('identityValue');
   elements.focusValue = document.getElementById('focusValue');
   elements.interactionValue = document.getElementById('interactionValue');
-  elements.resultCard = document.getElementById('resultCard');
   elements.toast = document.getElementById('toast');
 }
 
@@ -83,7 +87,8 @@ function setButtonState(button, loading, text) {
 }
 
 // Camera Functions
-async function startCamera() {
+// ✅ FIX 3: Accept target video element so enrollment & attendance don't collide
+async function startCamera(videoEl) {
   try {
     if (videoStream) {
       videoStream.getTracks().forEach(track => track.stop());
@@ -92,10 +97,10 @@ async function startCamera() {
       video: { width: 640, height: 480, facingMode: 'user' },
       audio: false
     });
-    elements.video.srcObject = videoStream;
+    videoEl.srcObject = videoStream;
     return new Promise((resolve) => {
-      elements.video.onloadedmetadata = () => {
-        elements.video.play();
+      videoEl.onloadedmetadata = () => {
+        videoEl.play();
         setTimeout(resolve, 500);
       };
     });
@@ -114,11 +119,12 @@ function stopCamera() {
 }
 
 // Face Detection Functions
-async function captureFaceDescriptor() {
+// ✅ FIX 3: Accept target video element
+async function captureFaceDescriptor(videoEl) {
   if (!modelsLoaded) {
     throw new Error('Models not loaded yet');
   }
-  const detections = await faceapi.detectSingleFace(elements.video, new faceapi.SsdMobilenetv1Options()).withFaceLandmarks().withFaceDescriptor();
+  const detections = await faceapi.detectSingleFace(videoEl, new faceapi.SsdMobilenetv1Options()).withFaceLandmarks().withFaceDescriptor();
 
   if (!detections) {
     throw new Error('No face detected. Make sure one face is centered and well lit.');
@@ -127,10 +133,11 @@ async function captureFaceDescriptor() {
   return detections.descriptor;
 }
 
-async function waitForFace(maxAttempts = 30) {
+// ✅ FIX 3: Accept target video element
+async function waitForFace(videoEl, maxAttempts = 30) {
   for (let i = 0; i < maxAttempts; i++) {
     try {
-      const descriptor = await captureFaceDescriptor();
+      const descriptor = await captureFaceDescriptor(videoEl);
       return descriptor;
     } catch (err) {
       if (i === maxAttempts - 1) throw err;
@@ -161,19 +168,18 @@ async function handleProceedToCamera() {
     return;
   }
 
-  // Proceed to Step 2
   enrollmentStep = 2;
   elements.enrollmentStepNum.textContent = '2';
   elements.enrollmentStep1.classList.add('hidden');
   elements.enrollmentStep2.classList.remove('hidden');
   elements.cameraHint.textContent = 'Position your face in the center. Good lighting helps.';
 
-  // Start camera when entering step 2
   try {
-    await startCamera();
+    // ✅ FIX 3: Pass enrollment video element
+    await startCamera(elements.enrollVideo);
     await loadModelsIfNeeded();
   } catch (err) {
-    showToast('Failed to initialize camera or load models', true);
+    showToast('Failed to initialize camera', true);
     goToStep(1);
   }
 }
@@ -219,7 +225,8 @@ async function handleStartEnrollment() {
       elements.enrollmentPrompt.textContent = `Pose ${currentPoseIndex + 1}/5: ${poses[currentPoseIndex]}`;
       
       try {
-        const descriptor = await waitForFace(50);
+        // ✅ FIX 3: Pass enrollment video element
+        const descriptor = await waitForFace(elements.enrollVideo, 50);
         enrollmentDescriptors.push(Array.from(descriptor));
         currentPoseIndex++;
         retryCount = 0;
@@ -246,7 +253,6 @@ async function handleStartEnrollment() {
       }
     }
 
-    // All poses captured successfully
     await completeEnrollment(fullName, email, password);
     
   } catch (err) {
@@ -261,7 +267,8 @@ async function handleRetryEnrollment() {
   retryCount = 0;
   
   try {
-    const descriptor = await waitForFace(50);
+    // ✅ FIX 3: Pass enrollment video element
+    const descriptor = await waitForFace(elements.enrollVideo, 50);
     enrollmentDescriptors[currentPoseIndex] = Array.from(descriptor);
     currentPoseIndex++;
     
@@ -309,7 +316,6 @@ async function completeEnrollment(fullName, email, password) {
       throw new Error(errorData.error || 'Enrollment failed');
     }
 
-    // Success!
     stopCamera();
     elements.generatedUserId.textContent = userId;
     elements.generatedUserIdCard.classList.remove('hidden');
@@ -376,15 +382,14 @@ async function handleStartAttendance() {
   setButtonState(elements.startAttendanceBtn, true, 'Verifying...');
 
   try {
-    // Start camera for verification
-    await startCamera();
+    // ✅ FIX 3: Pass attendance video element
+    await startCamera(elements.attendanceVideo);
     await loadModelsIfNeeded();
 
-    // Capture face for verification
     elements.enrollmentPrompt.textContent = 'Verifying your identity...';
-    const descriptor = await waitForFace(50);
+    // ✅ FIX 3: Pass attendance video element
+    const descriptor = await waitForFace(elements.attendanceVideo, 50);
 
-    // Verify against stored descriptors
     const response = await fetch(`${window.MLAVS_CONFIG.apiBase}/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -401,7 +406,6 @@ async function handleStartAttendance() {
 
     const verifyData = await response.json();
     
-    // Start session
     const sessionResponse = await fetch(`${window.MLAVS_CONFIG.apiBase}/sessions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -420,7 +424,6 @@ async function handleStartAttendance() {
     const sessionData = await sessionResponse.json();
     sessionId = sessionData.sessionId;
 
-    // Update UI
     elements.sessionBadge.textContent = 'Active';
     elements.sessionBadge.classList.remove('muted-badge');
     elements.sessionIdValue.textContent = sessionId;
@@ -431,8 +434,6 @@ async function handleStartAttendance() {
     elements.startAttendanceBtn.disabled = true;
 
     showToast('Session started successfully!', false);
-
-    // Start monitoring
     startMonitoring();
 
   } catch (err) {
@@ -449,11 +450,8 @@ function startMonitoring() {
   let interactions = 0;
   
   monitoringInterval = setInterval(() => {
-    // Simulate focus tracking (in real implementation, use eye tracking)
     focusScore = Math.max(60, Math.min(100, focusScore + (Math.random() - 0.5) * 10));
     elements.focusValue.textContent = `${Math.round(focusScore)}%`;
-
-    // Track interactions (could be enhanced with actual event listeners)
     if (Math.random() > 0.7) {
       interactions++;
       elements.interactionValue.textContent = interactions.toString();
@@ -471,44 +469,37 @@ function handleEndSession() {
   elements.sessionBadge.classList.add('muted-badge');
   elements.endSessionBtn.disabled = true;
   elements.startAttendanceBtn.disabled = false;
-
   showToast('Session ended', false);
 }
 
-// ✅ UPDATED: Model Loading - Uses CDN models (no local folder needed)
+// Model Loading - Uses config.modelBase correctly
 async function loadModelsIfNeeded() {
   if (modelsLoaded) return;
   
-  // Wait for faceapi library to be fully loaded with nets
+  // Wait for faceapi library to be fully loaded
   if (typeof faceapi === 'undefined' || !faceapi.nets) {
-    console.log('Waiting for faceapi library to load...');
+    console.log('Waiting for faceapi library...');
     await new Promise((resolve) => {
-      const checkInterval = setInterval(() => {
+      const check = setInterval(() => {
         if (typeof faceapi !== 'undefined' && faceapi.nets) {
-          clearInterval(checkInterval);
+          clearInterval(check);
           resolve();
         }
       }, 100);
     });
   }
 
-  // Debug: verify faceapi is ready
-  console.log('faceapi available:', typeof faceapi);
-  console.log('faceapi.nets available:', !!faceapi?.nets);
-
   try {
-    // Use CDN-hosted models from @vladmandic/face-api
-    // These include proper manifest + shard files required by loadFromUri()
-    const modelBase = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model';
+    const modelBase = window.MLAVS_CONFIG.modelBase;
     
     await Promise.all([
-      faceapi.nets.ssdMobilenetv1.loadFromUri(modelBase + '/ssd_mobilenetv1_model'),
-      faceapi.nets.faceLandmark68.loadFromUri(modelBase + '/face_landmark_68_model'),
-      faceapi.nets.faceRecognitionNet.loadFromUri(modelBase + '/face_recognition_model')
+      faceapi.nets.ssdMobilenetv1.loadFromUri(modelBase),
+      faceapi.nets.faceLandmark68.loadFromUri(modelBase),
+      faceapi.nets.faceRecognitionNet.loadFromUri(modelBase)
     ]);
     
     modelsLoaded = true;
-    console.log('✓ Face recognition models loaded from CDN');
+    console.log('✓ Models loaded from:', modelBase);
   } catch (err) {
     console.error('Model loading error:', err);
     throw new Error('Failed to load face recognition models: ' + err.message);
@@ -537,7 +528,6 @@ async function checkHealth() {
 function init() {
   cacheElements();
   
-  // Event Listeners
   elements.proceedToCameraBtn.addEventListener('click', handleProceedToCamera);
   elements.backToFormBtn.addEventListener('click', () => goToStep(1));
   elements.startEnrollmentBtn.addEventListener('click', handleStartEnrollment);
@@ -547,21 +537,17 @@ function init() {
   elements.startAttendanceBtn.addEventListener('click', handleStartAttendance);
   elements.endSessionBtn.addEventListener('click', handleEndSession);
 
-  // Initial state
   elements.startAttendanceBtn.disabled = true;
 
-  // Load models on page load (non-blocking)
+  // Non-blocking model preload
   loadModelsIfNeeded().catch(err => {
     console.warn('Model preload failed (will retry on first use):', err.message);
   });
 
-  // Health check
   checkHealth();
-
   console.log('MLAVS initialized');
 }
 
-// Start when DOM is ready
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', init);
 } else {
