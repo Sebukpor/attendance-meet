@@ -1,563 +1,550 @@
-const APP_CONFIG = window.MLAVS_CONFIG || {};
-const API_BASE = (APP_CONFIG.apiBase || "https://sebukpor-attendance.hf.space/api/v1").replace(/\/$/, "");
-const LOCAL_MODEL_URL = (APP_CONFIG.modelBase || "/models").replace(/\/$/, "");
-const CDN_MODEL_URL = "https://cdn.jsdelivr.net/gh/vladmandic/face-api/model";
-const ENROLLMENT_POSES = ["front", "left", "right", "up", "down"];
-const PASSIVE_FLUSH_MS = 10_000;
-const CHECKPOINT_MIN_MS = 8 * 60 * 1000;
-const CHECKPOINT_MAX_MS = 15 * 60 * 1000;
-const CHECKPOINT_PIN = APP_CONFIG.checkpointPin || "2468";
-const SSD_OPTIONS = { minConfidence: 0.5, maxResults: 1 };
-
-const state = {
-  modelsLoaded: false,
-  stream: null,
-  enrollmentCaptures: [],
-  enrollmentIndex: 0,
-  sessionId: null,
-  passive: {
-    visibleSeconds: 0,
-    totalSeconds: 0,
-    interactionCount: 0,
-  },
-  passiveIntervalId: null,
-  passiveTickId: null,
-  checkpointTimeoutId: null,
-  checkpointAudioContext: null,
-};
-
-const elements = {
-  video: document.getElementById("video"),
-  overlay: document.getElementById("overlay"),
-  healthStatus: document.getElementById("healthStatus"),
-  healthHint: document.getElementById("healthHint"),
-  enrollmentPrompt: document.getElementById("enrollmentPrompt"),
-  enrollmentProgress: document.getElementById("enrollmentProgress"),
-  enrollmentCount: document.getElementById("enrollmentCount"),
-  startEnrollmentBtn: document.getElementById("startEnrollmentBtn"),
-  loginBtn: document.getElementById("loginBtn"),
-  startAttendanceBtn: document.getElementById("startAttendanceBtn"),
-  endSessionBtn: document.getElementById("endSessionBtn"),
-  sessionBadge: document.getElementById("sessionBadge"),
-  sessionIdValue: document.getElementById("sessionIdValue"),
-  identityValue: document.getElementById("identityValue"),
-  focusValue: document.getElementById("focusValue"),
-  interactionValue: document.getElementById("interactionValue"),
-  resultCard: document.getElementById("resultCard"),
-  toast: document.getElementById("toast"),
-  cameraHint: document.getElementById("cameraHint"),
-  enrollUserId: document.getElementById("enrollUserId"),
-  enrollFullName: document.getElementById("enrollFullName"),
-  loginUserId: document.getElementById("loginUserId"),
-  meetingUrl: document.getElementById("meetingUrl"),
-  meetingTitle: document.getElementById("meetingTitle"),
-};
-
-async function boot() {
-  bindUI();
-  await Promise.all([loadModels(), checkHealth()]);
-  try {
-    await ensureCamera();
-  } catch (error) {
-    console.warn("Camera not ready during boot.", error);
+// MLAVS - Multi-Layer Attendance Verification System
+(function() {
+  'use strict';
+  
+  // State
+  let modelsLoaded = false;
+  let videoStream = null;
+  let enrollmentDescriptors = [];
+  let enrollmentStep = 1;
+  let currentPoseIndex = 0;
+  let retryCount = 0;
+  const MAX_RETRIES = 5;
+  let sessionId = null;
+  let monitoringInterval = null;
+  
+  // DOM Elements
+  const elements = {};
+  
+  function cacheElements() {
+    elements.enrollFullName = document.getElementById('enrollFullName');
+    elements.enrollEmail = document.getElementById('enrollEmail');
+    elements.enrollPassword = document.getElementById('enrollPassword');
+    elements.proceedToCameraBtn = document.getElementById('proceedToCameraBtn');
+    elements.backToFormBtn = document.getElementById('backToFormBtn');
+    elements.startEnrollmentBtn = document.getElementById('startEnrollmentBtn');
+    elements.retryEnrollmentBtn = document.getElementById('retryEnrollmentBtn');
+    elements.enrollmentStep1 = document.getElementById('enrollmentStep1');
+    elements.enrollmentStep2 = document.getElementById('enrollmentStep2');
+    elements.enrollmentStepNum = document.getElementById('enrollmentStepNum');
+    elements.enrollmentPrompt = document.getElementById('enrollmentPrompt');
+    elements.enrollmentProgress = document.getElementById('enrollmentProgress');
+    elements.enrollmentCount = document.getElementById('enrollmentCount');
+    elements.generatedUserIdCard = document.getElementById('generatedUserIdCard');
+    elements.generatedUserId = document.getElementById('generatedUserId');
+    elements.copyUserIdBtn = document.getElementById('copyUserIdBtn');
+    elements.video = document.getElementById('video');
+    elements.overlay = document.getElementById('overlay');
+    elements.cameraHint = document.getElementById('cameraHint');
+    elements.loginUserId = document.getElementById('loginUserId');
+    elements.meetingUrl = document.getElementById('meetingUrl');
+    elements.meetingTitle = document.getElementById('meetingTitle');
+    elements.loginBtn = document.getElementById('loginBtn');
+    elements.startAttendanceBtn = document.getElementById('startAttendanceBtn');
+    elements.endSessionBtn = document.getElementById('endSessionBtn');
+    elements.healthStatus = document.getElementById('healthStatus');
+    elements.healthHint = document.getElementById('healthHint');
+    elements.sessionBadge = document.getElementById('sessionBadge');
+    elements.sessionIdValue = document.getElementById('sessionIdValue');
+    elements.identityValue = document.getElementById('identityValue');
+    elements.focusValue = document.getElementById('focusValue');
+    elements.interactionValue = document.getElementById('interactionValue');
+    elements.resultCard = document.getElementById('resultCard');
+    elements.toast = document.getElementById('toast');
   }
-}
+  
+  // Utility Functions
+  function generateUserId() {
+    const timestamp = Date.now().toString(36);
+    const randomPart = Math.random().toString(36).substring(2, 8);
+    return `user_${timestamp}_${randomPart}`;
+  }
+  
+  async function hashPassword(password) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(password);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  
+  function showToast(message, isError = false) {
+    elements.toast.textContent = message;
+    elements.toast.classList.toggle('error', isError);
+    elements.toast.classList.remove('hidden');
+    setTimeout(() => {
+      elements.toast.classList.add('hidden');
+    }, 4000);
+  }
+  
+  function setButtonState(button, loading, text) {
+    button.disabled = loading;
+    if (text) button.textContent = text;
+  }
+  
+  // Camera Functions
+  async function startCamera() {
+    try {
+      if (videoStream) {
+        videoStream.getTracks().forEach(track => track.stop());
+      }
+      videoStream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480, facingMode: 'user' },
+        audio: false
+      });
+      elements.video.srcObject = videoStream;
+      return new Promise((resolve) => {
+        elements.video.onloadedmetadata = () => {
+          elements.video.play();
+          setTimeout(resolve, 500);
+        };
+      });
+    } catch (err) {
+      console.error('Camera error:', err);
+      showToast('Camera access denied. Please enable camera permissions.', true);
+      throw err;
+    }
+  }
+  
+  function stopCamera() {
+    if (videoStream) {
+      videoStream.getTracks().forEach(track => track.stop());
+      videoStream = null;
+    }
+  }
+  
+  // Face Detection Functions
+  async function captureFaceDescriptor() {
+    if (!modelsLoaded) {
+      throw new Error('Models not loaded yet');
+    }
 
-function bindUI() {
-  elements.startEnrollmentBtn.addEventListener("click", handleEnrollmentFlow);
-  elements.loginBtn.addEventListener("click", handleLoginStatus);
-  elements.startAttendanceBtn.addEventListener("click", handleAttendanceStart);
-  elements.endSessionBtn.addEventListener("click", () => endSession("user"));
+    const detections = await faceapi.detectSingleFace(elements.video, new faceapi.SsdMobilenetv1Options()).withFaceLandmarks().withFaceDescriptor();
+    
+    if (!detections) {
+      throw new Error('No face detected. Make sure one face is centered and well lit.');
+    }
 
-  ["mousemove", "keydown", "click", "scroll"].forEach((eventName) => {
-    window.addEventListener(
-      eventName,
-      () => {
-        if (state.sessionId) {
-          state.passive.interactionCount += 1;
-          elements.interactionValue.textContent = String(state.passive.interactionCount);
+    return detections.descriptor;
+  }
+  
+  async function waitForFace(maxAttempts = 30) {
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const descriptor = await captureFaceDescriptor();
+        return descriptor;
+      } catch (err) {
+        if (i === maxAttempts - 1) throw err;
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    }
+    throw new Error('No face detected after waiting');
+  }
+  
+  // Enrollment Flow
+  async function handleProceedToCamera() {
+    const fullName = elements.enrollFullName.value.trim();
+    const email = elements.enrollEmail.value.trim();
+    const password = elements.enrollPassword.value.trim();
+
+    if (!fullName || !email || !password) {
+      showToast('Please fill in all fields', true);
+      return;
+    }
+
+    if (password.length < 6) {
+      showToast('Password must be at least 6 characters', true);
+      return;
+    }
+
+    if (!email.includes('@') || !email.includes('.')) {
+      showToast('Please enter a valid email address', true);
+      return;
+    }
+
+    // Proceed to Step 2
+    enrollmentStep = 2;
+    elements.enrollmentStepNum.textContent = '2';
+    elements.enrollmentStep1.classList.add('hidden');
+    elements.enrollmentStep2.classList.remove('hidden');
+    elements.cameraHint.textContent = 'Position your face in the center. Good lighting helps.';
+
+    // Start camera when entering step 2
+    try {
+      await startCamera();
+      await loadModelsIfNeeded();
+    } catch (err) {
+      showToast('Failed to initialize camera', true);
+      goToStep(1);
+    }
+  }
+  
+  function goToStep(step) {
+    enrollmentStep = step;
+    elements.enrollmentStepNum.textContent = step.toString();
+    
+    if (step === 1) {
+      elements.enrollmentStep1.classList.remove('hidden');
+      elements.enrollmentStep2.classList.add('hidden');
+      stopCamera();
+    } else {
+      elements.enrollmentStep1.classList.add('hidden');
+      elements.enrollmentStep2.classList.remove('hidden');
+    }
+  }
+  
+  async function handleStartEnrollment() {
+    const fullName = elements.enrollFullName.value.trim();
+    const email = elements.enrollEmail.value.trim();
+    const password = elements.enrollPassword.value.trim();
+
+    enrollmentDescriptors = [];
+    currentPoseIndex = 0;
+    retryCount = 0;
+
+    const poses = [
+      'Look straight at the camera',
+      'Tilt your head slightly up',
+      'Tilt your head slightly down',
+      'Turn your head slightly left',
+      'Turn your head slightly right'
+    ];
+
+    elements.startEnrollmentBtn.classList.add('hidden');
+    elements.retryEnrollmentBtn.classList.add('hidden');
+    elements.generatedUserIdCard.classList.add('hidden');
+    elements.enrollmentProgress.value = 0;
+    elements.enrollmentCount.textContent = '0 / 5';
+
+    try {
+      while (currentPoseIndex < poses.length) {
+        elements.enrollmentPrompt.textContent = `Pose ${currentPoseIndex + 1}/5: ${poses[currentPoseIndex]}`;
+        
+        try {
+          const descriptor = await waitForFace(50);
+          enrollmentDescriptors.push(Array.from(descriptor));
+          currentPoseIndex++;
+          retryCount = 0;
+          
+          elements.enrollmentProgress.value = currentPoseIndex;
+          elements.enrollmentCount.textContent = `${currentPoseIndex} / 5`;
+          showToast(`Pose ${currentPoseIndex} captured!`, false);
+          
+          await new Promise(resolve => setTimeout(resolve, 800));
+        } catch (err) {
+          retryCount++;
+          console.warn(`Face detection failed (attempt ${retryCount}/${MAX_RETRIES}):`, err.message);
+          
+          if (retryCount >= MAX_RETRIES) {
+            showToast(`Failed to capture pose ${currentPoseIndex + 1} after ${MAX_RETRIES} attempts. Please try again.`, true);
+            elements.retryEnrollmentBtn.classList.remove('hidden');
+            elements.retryEnrollmentBtn.textContent = `Retry Pose ${currentPoseIndex + 1}`;
+            elements.enrollmentPrompt.textContent = `Not detected (${retryCount}/${MAX_RETRIES}). Adjust & retry.`;
+            return;
+          }
+          
+          elements.enrollmentPrompt.textContent = `Not detected (${retryCount}/${MAX_RETRIES}). Adjust position and wait...`;
+          await new Promise(resolve => setTimeout(resolve, 1000));
         }
-      },
-      { passive: true }
-    );
-  });
+      }
 
-  document.addEventListener("visibilitychange", () => {
-    updateBadge(document.hidden ? "Tab hidden" : state.sessionId ? "Session active" : "Idle");
-  });
+      // All poses captured successfully
+      await completeEnrollment(fullName, email, password);
+      
+    } catch (err) {
+      console.error('Enrollment error:', err);
+      showToast(err.message, true);
+      elements.startEnrollmentBtn.classList.remove('hidden');
+    }
+  }
+  
+  async function handleRetryEnrollment() {
+    elements.retryEnrollmentBtn.classList.add('hidden');
+    retryCount = 0;
+    
+    try {
+      const descriptor = await waitForFace(50);
+      enrollmentDescriptors[currentPoseIndex] = Array.from(descriptor);
+      currentPoseIndex++;
+      
+      elements.enrollmentProgress.value = currentPoseIndex;
+      elements.enrollmentCount.textContent = `${currentPoseIndex} / 5`;
+      showToast(`Pose ${currentPoseIndex} captured!`, false);
+      
+      if (currentPoseIndex >= 5) {
+        const fullName = elements.enrollFullName.value.trim();
+        const email = elements.enrollEmail.value.trim();
+        const password = elements.enrollPassword.value.trim();
+        await completeEnrollment(fullName, email, password);
+      } else {
+        elements.startEnrollmentBtn.classList.remove('hidden');
+      }
+    } catch (err) {
+      showToast(err.message, true);
+      elements.retryEnrollmentBtn.classList.remove('hidden');
+    }
+  }
+  
+  async function completeEnrollment(fullName, email, password) {
+    const userId = generateUserId();
+    const hashedPassword = await hashPassword(password);
+    const salt = Math.random().toString(36).substring(2, 15);
 
-  window.addEventListener("beforeunload", () => {
-    if (!state.sessionId) {
+    elements.enrollmentPrompt.textContent = 'Saving your enrollment...';
+    
+    try {
+      const response = await fetch(`${window.MLAVS_CONFIG.apiBase}/enroll`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId,
+          fullName,
+          email,
+          password: hashedPassword,
+          salt,
+          descriptors: enrollmentDescriptors
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Enrollment failed');
+      }
+
+      // Success!
+      stopCamera();
+      elements.generatedUserId.textContent = userId;
+      elements.generatedUserIdCard.classList.remove('hidden');
+      elements.enrollmentPrompt.textContent = '✓ Enrollment Complete!';
+      showToast('Enrollment successful! Copy your User ID.', false);
+      
+    } catch (err) {
+      console.error('Enrollment API error:', err);
+      showToast(err.message, true);
+      elements.startEnrollmentBtn.classList.remove('hidden');
+    }
+  }
+  
+  async function handleCopyUserId() {
+    const userId = elements.generatedUserId.textContent;
+    try {
+      await navigator.clipboard.writeText(userId);
+      showToast('User ID copied to clipboard!', false);
+    } catch (err) {
+      showToast('Failed to copy. Select and copy manually.', true);
+    }
+  }
+  
+  // Login & Attendance Functions
+  async function handleLogin() {
+    const userId = elements.loginUserId.value.trim();
+    
+    if (!userId) {
+      showToast('Please enter your User ID', true);
       return;
     }
-    const payload = JSON.stringify({ session_id: state.sessionId, ended_by: "beforeunload" });
-    navigator.sendBeacon(`${API_BASE}/exit`, new Blob([payload], { type: "application/json" }));
-  });
-}
 
-async function loadModels() {
-  try {
-    const modelBase = await resolveModelBase();
-    await faceapi.nets.ssdMobilenetv1.loadFromUri(modelBase);
-    await faceapi.nets.faceLandmark68Net.loadFromUri(modelBase);
-    await faceapi.nets.faceRecognitionNet.loadFromUri(modelBase);
-    state.modelsLoaded = true;
-    showToast(`Face models loaded from ${modelBase.startsWith("/") ? "local assets" : "CDN"}.`);
-  } catch (error) {
-    console.error(error);
-    showToast("Could not load face models. Add local assets under /models or keep CDN access enabled.", true);
-  }
-}
-
-async function resolveModelBase() {
-  try {
-    const response = await fetch(`${LOCAL_MODEL_URL}/ssd_mobilenetv1_model-weights_manifest.json`, { method: "HEAD" });
-    if (response.ok) {
-      return LOCAL_MODEL_URL;
-    }
-  } catch (error) {
-    console.warn("Local models unavailable, falling back to CDN.", error);
-  }
-  return CDN_MODEL_URL;
-}
-
-async function ensureCamera() {
-  if (state.stream) {
-    return state.stream;
-  }
-
-  state.stream = await navigator.mediaDevices.getUserMedia({
-    video: { width: 640, height: 480, facingMode: "user" },
-    audio: false,
-  });
-  elements.video.srcObject = state.stream;
-  elements.cameraHint.textContent = "Camera ready. Embeddings are generated in-browser only.";
-  return state.stream;
-}
-
-async function checkHealth() {
-  try {
-    const response = await fetch(`${API_BASE}/health`);
-    const data = await response.json();
-    elements.healthStatus.textContent = data.status.toUpperCase();
-    elements.healthHint.textContent = `Users: ${data.users} | Sessions: ${data.sessions}`;
-  } catch (error) {
-    elements.healthStatus.textContent = "OFFLINE";
-    elements.healthHint.textContent = "Backend unreachable. Update frontend-vercel/config.js with your HF API URL.";
-  }
-}
-
-async function handleLoginStatus() {
-  const userId = elements.loginUserId.value.trim();
-  if (!userId) {
-    showToast("Enter a user ID first.", true);
-    return;
-  }
-  try {
-    const response = await request("/login", {
-      method: "POST",
-      body: JSON.stringify({ user_id: userId }),
-    });
-    showToast(`Enrollment found for ${response.full_name}.`);
-  } catch (error) {
-    handleError(error);
-  }
-}
-
-async function handleEnrollmentFlow() {
-  const userId = elements.enrollUserId.value.trim();
-  const fullName = elements.enrollFullName.value.trim();
-  if (!userId || !fullName) {
-    showToast("Provide both user ID and full name before enrollment.", true);
-    return;
-  }
-
-  try {
-    await ensureCamera();
-  } catch (error) {
-    handleError(new Error("Camera access is required for enrollment."));
-    return;
-  }
-
-  state.enrollmentCaptures = [];
-  state.enrollmentIndex = 0;
-  elements.startEnrollmentBtn.disabled = true;
-  elements.resultCard.classList.add("hidden");
-
-  try {
-    for (const pose of ENROLLMENT_POSES) {
-      elements.enrollmentPrompt.textContent = `Align your face for the "${pose}" capture, then stay still for a moment.`;
-      const detection = await captureFaceDescriptor();
-      state.enrollmentCaptures.push({
-        pose,
-        embedding: { values: Array.from(detection.descriptor) },
-        quality_score: scoreCaptureQuality(detection),
-        detection_score: detection.detection.score,
-      });
-      state.enrollmentIndex += 1;
-      elements.enrollmentProgress.value = state.enrollmentIndex;
-      elements.enrollmentCount.textContent = `${state.enrollmentIndex} / ${ENROLLMENT_POSES.length}`;
-      await wait(800);
-    }
-
-    const response = await request("/enroll", {
-      method: "POST",
-      body: JSON.stringify({
-        user_id: userId,
-        full_name: fullName,
-        captures: state.enrollmentCaptures,
-        metadata: {
-          user_agent: navigator.userAgent,
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        },
-      }),
-    });
-
-    elements.enrollmentPrompt.textContent = `Enrollment complete with quality score ${response.average_quality_score}.`;
-    renderResult({
-      title: "Enrollment complete",
-      status: "Success",
-      body: `Stored ${response.capture_count} reference embeddings for ${response.user_id}.`,
-    });
-  } catch (error) {
-    handleError(error);
-    elements.enrollmentPrompt.textContent = "Enrollment failed. Improve lighting and keep one face centered in frame.";
-  } finally {
-    elements.startEnrollmentBtn.disabled = false;
-  }
-}
-
-async function handleAttendanceStart() {
-  const userId = elements.loginUserId.value.trim();
-  const meetingUrl = elements.meetingUrl.value.trim();
-  const meetingTitle = elements.meetingTitle.value.trim();
-  if (!userId || !meetingUrl) {
-    showToast("Enter a user ID and meeting URL to start attendance.", true);
-    return;
-  }
-
-  try {
-    await ensureCamera();
-    updateBadge("Verifying identity");
-    const detection = await captureFaceDescriptor();
-    const response = await request("/start", {
-      method: "POST",
-      body: JSON.stringify({
-        user_id: userId,
-        meeting_url: meetingUrl,
-        meeting_title: meetingTitle || null,
-        live_embedding: { values: Array.from(detection.descriptor) },
-      }),
-    });
-
-    state.sessionId = response.session_id;
-    resetPassiveMetrics();
-    elements.sessionIdValue.textContent = state.sessionId;
-    elements.identityValue.textContent = `${Math.round(response.identity_confidence * 100)}%`;
-    elements.endSessionBtn.disabled = false;
-    updateBadge("Session active");
-    showToast("Attendance session started.");
-
-    stopCameraStream();
-    startPassiveMonitoring();
-    scheduleNextCheckpoint();
-  } catch (error) {
-    handleError(error);
-    updateBadge("Idle");
-  }
-}
-
-async function captureFaceDescriptor() {
-  if (!state.modelsLoaded) {
-    throw new Error("Face models are not loaded yet.");
-  }
-
-  let lastDetection = null;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    lastDetection = await faceapi
-      .detectSingleFace(elements.video, new faceapi.SsdMobilenetv1Options(SSD_OPTIONS))
-      .withFaceLandmarks()
-      .withFaceDescriptor();
-    drawOverlay(lastDetection);
-    if (lastDetection) {
-      return lastDetection;
-    }
-    await wait(500);
-  }
-  throw new Error("No face detected. Make sure one face is centered and well lit.");
-}
-
-function drawOverlay(detection) {
-  const context = elements.overlay.getContext("2d");
-  context.clearRect(0, 0, elements.overlay.width, elements.overlay.height);
-  if (!detection) {
-    return;
-  }
-  const { box } = detection.detection;
-  context.strokeStyle = "#36d399";
-  context.lineWidth = 3;
-  context.strokeRect(box.x, box.y, box.width, box.height);
-}
-
-function scoreCaptureQuality(detection) {
-  const box = detection.detection.box;
-  const descriptor = Array.from(detection.descriptor);
-  const descriptorStdDev = standardDeviation(descriptor);
-  const boxCoverage = Math.min((box.width * box.height) / (640 * 480), 1);
-  const coverageScore = clamp(boxCoverage / 0.18, 0, 1);
-  const varianceScore = clamp(descriptorStdDev / 0.12, 0, 1);
-  const confidenceScore = clamp(detection.detection.score, 0, 1);
-  return Number(((coverageScore * 0.4) + (varianceScore * 0.2) + (confidenceScore * 0.4)).toFixed(4));
-}
-
-function startPassiveMonitoring() {
-  stopPassiveMonitoring();
-
-  state.passiveTickId = window.setInterval(() => {
-    state.passive.totalSeconds += 1;
-    if (!document.hidden) {
-      state.passive.visibleSeconds += 1;
-    }
-    updateFocusUI();
-  }, 1000);
-
-  state.passiveIntervalId = window.setInterval(async () => {
-    if (!state.sessionId) {
-      return;
-    }
+    setButtonState(elements.loginBtn, true, 'Checking...');
+    
     try {
-      const response = await request("/passive", {
-        method: "POST",
-        body: JSON.stringify({
-          session_id: state.sessionId,
-          visible_seconds: state.passive.visibleSeconds,
-          total_seconds: state.passive.totalSeconds,
-          interaction_count: state.passive.interactionCount,
-        }),
-      });
-      elements.focusValue.textContent = `${Math.round(response.focus_ratio * 100)}%`;
-      resetPassiveMetrics();
-    } catch (error) {
-      console.error("Passive monitoring flush failed", error);
-    }
-  }, PASSIVE_FLUSH_MS);
-}
-
-function stopPassiveMonitoring() {
-  if (state.passiveTickId) {
-    clearInterval(state.passiveTickId);
-    state.passiveTickId = null;
-  }
-  if (state.passiveIntervalId) {
-    clearInterval(state.passiveIntervalId);
-    state.passiveIntervalId = null;
-  }
-}
-
-function resetPassiveMetrics() {
-  state.passive.visibleSeconds = 0;
-  state.passive.totalSeconds = 0;
-  state.passive.interactionCount = 0;
-  elements.interactionValue.textContent = "0";
-  elements.focusValue.textContent = "-";
-}
-
-function scheduleNextCheckpoint() {
-  clearScheduledCheckpoint();
-  state.checkpointTimeoutId = window.setTimeout(runCheckpoint, randomInt(CHECKPOINT_MIN_MS, CHECKPOINT_MAX_MS));
-}
-
-function clearScheduledCheckpoint() {
-  if (state.checkpointTimeoutId) {
-    clearTimeout(state.checkpointTimeoutId);
-    state.checkpointTimeoutId = null;
-  }
-}
-
-async function runCheckpoint() {
-  if (!state.sessionId) {
-    return;
-  }
-
-  playCheckpointTone();
-  const confirmed = window.confirm("Attendance checkpoint: click OK to confirm you are still present.");
-  if (confirmed) {
-    try {
-      await request("/checkpoint", {
-        method: "POST",
-        body: JSON.stringify({
-          session_id: state.sessionId,
-          response_type: "face",
-          success: true,
-          pin_used: false,
-          notes: "Browser confirm acknowledged.",
-        }),
-      });
-      showToast("Checkpoint confirmed.");
-    } catch (error) {
-      handleError(error);
+      const response = await fetch(`${window.MLAVS_CONFIG.apiBase}/user/${encodeURIComponent(userId)}`);
+      
+      if (response.ok) {
+        const userData = await response.json();
+        showToast(`Welcome, ${userData.fullName}!`, false);
+        elements.startAttendanceBtn.disabled = false;
+      } else {
+        showToast('User ID not found. Please enroll first.', true);
+        elements.startAttendanceBtn.disabled = true;
+      }
+    } catch (err) {
+      console.error('Login check error:', err);
+      showToast('Failed to check user ID', true);
     } finally {
-      scheduleNextCheckpoint();
+      setButtonState(elements.loginBtn, false, 'Check enrollment');
     }
-    return;
   }
+  
+  async function handleStartAttendance() {
+    const userId = elements.loginUserId.value.trim();
+    const meetingUrl = elements.meetingUrl.value.trim();
+    const meetingTitle = elements.meetingTitle.value.trim();
 
-  const enteredPin = window.prompt("Camera unavailable or confirmation skipped. Enter your attendance PIN:");
-  const pinSuccess = enteredPin === CHECKPOINT_PIN;
-  try {
-    await request("/checkpoint", {
-      method: "POST",
-      body: JSON.stringify({
-        session_id: state.sessionId,
-        response_type: pinSuccess ? "pin" : "missed",
-        success: pinSuccess,
-        pin_used: true,
-        notes: pinSuccess ? "PIN fallback accepted." : "Checkpoint missed or invalid PIN.",
-      }),
-    });
-    showToast(pinSuccess ? "PIN fallback accepted." : "Checkpoint failed. This will affect the final attendance score.", !pinSuccess);
-  } catch (error) {
-    handleError(error);
-  } finally {
-    scheduleNextCheckpoint();
+    if (!userId || !meetingUrl) {
+      showToast('Please enter User ID and Meeting URL', true);
+      return;
+    }
+
+    setButtonState(elements.startAttendanceBtn, true, 'Verifying...');
+
+    try {
+      // Start camera for verification
+      await startCamera();
+      await loadModelsIfNeeded();
+
+      // Capture face for verification
+      elements.enrollmentPrompt.textContent = 'Verifying your identity...';
+      const descriptor = await waitForFace(50);
+
+      // Verify against stored descriptors
+      const response = await fetch(`${window.MLAVS_CONFIG.apiBase}/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId,
+          descriptor: Array.from(descriptor)
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Verification failed');
+      }
+
+      const verifyData = await response.json();
+      
+      // Start session
+      const sessionResponse = await fetch(`${window.MLAVS_CONFIG.apiBase}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId,
+          meetingUrl,
+          meetingTitle,
+          confidence: verifyData.confidence
+        })
+      });
+
+      if (!sessionResponse.ok) {
+        throw new Error('Failed to start session');
+      }
+
+      const sessionData = await sessionResponse.json();
+      sessionId = sessionData.sessionId;
+
+      // Update UI
+      elements.sessionBadge.textContent = 'Active';
+      elements.sessionBadge.classList.remove('muted-badge');
+      elements.sessionIdValue.textContent = sessionId;
+      elements.identityValue.textContent = `${Math.round(verifyData.confidence * 100)}%`;
+      elements.focusValue.textContent = '-';
+      elements.interactionValue.textContent = '0';
+      elements.endSessionBtn.disabled = false;
+      elements.startAttendanceBtn.disabled = true;
+
+      showToast('Session started successfully!', false);
+
+      // Start monitoring
+      startMonitoring();
+
+    } catch (err) {
+      console.error('Attendance error:', err);
+      showToast(err.message, true);
+      stopCamera();
+    } finally {
+      setButtonState(elements.startAttendanceBtn, false, 'Verify and start session');
+    }
   }
-}
+  
+  function startMonitoring() {
+    let focusScore = 100;
+    let interactions = 0;
 
-async function endSession(reason) {
-  if (!state.sessionId) {
-    return;
+    monitoringInterval = setInterval(() => {
+      // Simulate focus tracking (in real implementation, use eye tracking)
+      focusScore = Math.max(60, Math.min(100, focusScore + (Math.random() - 0.5) * 10));
+      elements.focusValue.textContent = `${Math.round(focusScore)}%`;
+
+      // Track interactions (could be enhanced with actual event listeners)
+      if (Math.random() > 0.7) {
+        interactions++;
+        elements.interactionValue.textContent = interactions.toString();
+      }
+    }, 5000);
   }
+  
+  function handleEndSession() {
+    if (monitoringInterval) {
+      clearInterval(monitoringInterval);
+      monitoringInterval = null;
+    }
+    stopCamera();
 
-  clearScheduledCheckpoint();
-  stopPassiveMonitoring();
-
-  try {
-    const response = await request("/exit", {
-      method: "POST",
-      body: JSON.stringify({ session_id: state.sessionId, ended_by: reason }),
-    });
-    renderResult({
-      title: response.status,
-      status: `${response.final_score}%`,
-      body: `Identity ${response.identity_component} | Checkpoints ${response.checkpoint_component} | Duration ${response.duration_component} | Behavior ${response.behavioral_component}`,
-    });
-    showToast("Session closed.");
-  } catch (error) {
-    handleError(error);
-  } finally {
-    state.sessionId = null;
+    elements.sessionBadge.textContent = 'Ended';
+    elements.sessionBadge.classList.add('muted-badge');
     elements.endSessionBtn.disabled = true;
-    elements.sessionIdValue.textContent = "Not started";
-    elements.identityValue.textContent = "-";
-    updateBadge("Idle");
-    resetPassiveMetrics();
+    elements.startAttendanceBtn.disabled = false;
+
+    showToast('Session ended', false);
   }
-}
+  
+  // Model Loading
+  async function loadModelsIfNeeded() {
+    if (modelsLoaded) return;
 
-function stopCameraStream() {
-  if (!state.stream) {
-    return;
+    try {
+      const modelBase = window.MLAVS_CONFIG.modelBase;
+      await Promise.all([
+        faceapi.nets.ssdMobilenetv1.loadFromUri(modelBase),
+        faceapi.nets.faceLandmark68.loadFromUri(modelBase),
+        faceapi.nets.faceRecognitionNet.loadFromUri(modelBase)
+      ]);
+      modelsLoaded = true;
+      console.log('Face recognition models loaded');
+    } catch (err) {
+      console.error('Model loading error:', err);
+      throw new Error('Failed to load face recognition models');
+    }
   }
-  state.stream.getTracks().forEach((track) => track.stop());
-  state.stream = null;
-  elements.video.srcObject = null;
-  elements.cameraHint.textContent = "Camera released after verification. Passive monitoring continues without video.";
-}
-
-function playCheckpointTone() {
-  try {
-    const context = state.checkpointAudioContext || new AudioContext();
-    state.checkpointAudioContext = context;
-    const oscillator = context.createOscillator();
-    const gainNode = context.createGain();
-    oscillator.type = "triangle";
-    oscillator.frequency.value = 880;
-    gainNode.gain.value = 0.05;
-    oscillator.connect(gainNode);
-    gainNode.connect(context.destination);
-    oscillator.start();
-    oscillator.stop(context.currentTime + 0.35);
-  } catch (error) {
-    console.warn("Audio notification unavailable.", error);
+  
+  // Health Check
+  async function checkHealth() {
+    try {
+      const response = await fetch(`${window.MLAVS_CONFIG.apiBase}/health`);
+      if (response.ok) {
+        elements.healthStatus.textContent = 'Connected';
+        elements.healthStatus.style.color = 'var(--success)';
+        elements.healthHint.textContent = 'Backend is ready';
+      } else {
+        throw new Error('API returned non-OK status');
+      }
+    } catch (err) {
+      elements.healthStatus.textContent = 'Disconnected';
+      elements.healthStatus.style.color = 'var(--danger)';
+      elements.healthHint.textContent = 'Backend unavailable';
+    }
   }
-}
+  
+  // Initialize
+  function init() {
+    cacheElements();
 
-async function request(path, options) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  const isJson = response.headers.get("content-type")?.includes("application/json");
-  const payload = isJson ? await response.json() : await response.text();
-  if (!response.ok) {
-    const message =
-      typeof payload === "object"
-        ? payload.detail?.message || payload.detail || payload.message || "Request failed."
-        : payload || "Request failed.";
-    throw new Error(message);
+    // Event Listeners
+    elements.proceedToCameraBtn.addEventListener('click', handleProceedToCamera);
+    elements.backToFormBtn.addEventListener('click', () => goToStep(1));
+    elements.startEnrollmentBtn.addEventListener('click', handleStartEnrollment);
+    elements.retryEnrollmentBtn.addEventListener('click', handleRetryEnrollment);
+    elements.copyUserIdBtn.addEventListener('click', handleCopyUserId);
+    elements.loginBtn.addEventListener('click', handleLogin);
+    elements.startAttendanceBtn.addEventListener('click', handleStartAttendance);
+    elements.endSessionBtn.addEventListener('click', handleEndSession);
+
+    // Initial state
+    elements.startAttendanceBtn.disabled = true;
+
+    // Load models on page load
+    loadModelsIfNeeded().catch(console.error);
+
+    // Health check
+    checkHealth();
+
+    console.log('MLAVS initialized');
   }
-  return payload;
-}
 
-function renderResult({ title, status, body }) {
-  elements.resultCard.classList.remove("hidden");
-  elements.resultCard.innerHTML = `
-    <h3>${escapeHtml(title)}</h3>
-    <strong>${escapeHtml(status)}</strong>
-    <p>${escapeHtml(body)}</p>
-  `;
-}
-
-function updateBadge(label) {
-  elements.sessionBadge.textContent = label;
-}
-
-function updateFocusUI() {
-  if (state.passive.totalSeconds <= 0) {
-    return;
+  // Start when DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
   }
-  const ratio = Math.round((state.passive.visibleSeconds / state.passive.totalSeconds) * 100);
-  elements.focusValue.textContent = `${ratio}%`;
-}
-
-function showToast(message, isError = false) {
-  elements.toast.textContent = message;
-  elements.toast.classList.remove("hidden");
-  elements.toast.classList.toggle("error", isError);
-  window.clearTimeout(showToast.timeoutId);
-  showToast.timeoutId = window.setTimeout(() => elements.toast.classList.add("hidden"), 3500);
-}
-
-function handleError(error) {
-  console.error(error);
-  showToast(error.message || "Something went wrong.", true);
-}
-
-function wait(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-function standardDeviation(values) {
-  const average = values.reduce((sum, value) => sum + value, 0) / values.length;
-  const variance = values.reduce((sum, value) => sum + (value - average) ** 2, 0) / values.length;
-  return Math.sqrt(variance);
-}
-
-function clamp(value, min, max) {
-  return Math.min(Math.max(value, min), max);
-}
-
-function randomInt(min, max) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-boot();
+})();

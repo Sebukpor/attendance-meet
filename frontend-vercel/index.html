@@ -28,38 +28,67 @@
       </header>
 
       <main class="grid">
+        <!-- Enrollment Panel - Step-based -->
         <section class="panel">
           <div class="panel-heading">
-            <h2>1. Enrollment</h2>
-            <span class="badge">5 guided poses</span>
+            <h2>Enrollment</h2>
+            <span class="badge">Step <span id="enrollmentStepNum">1</span> of 2</span>
           </div>
-          <form id="enrollmentForm" class="stack">
-            <label>
-              User ID
-              <input id="enrollUserId" name="userId" type="text" required />
-            </label>
+          
+          <!-- Step 1: User Information Form -->
+          <div id="enrollmentStep1" class="stack">
+            <div class="panel-heading">
+              <h3>Step 1: Your Information</h3>
+            </div>
             <label>
               Full Name
-              <input id="enrollFullName" name="fullName" type="text" required />
+              <input id="enrollFullName" name="fullName" type="text" required placeholder="Enter your full name" />
             </label>
-            <button type="button" id="startEnrollmentBtn" class="primary">Start enrollment</button>
-            <p id="enrollmentPrompt" class="muted">We’ll guide you through front, left, right, up, and down poses.</p>
+            <label>
+              Email
+              <input id="enrollEmail" name="email" type="email" required placeholder="your.email@example.com" />
+            </label>
+            <label>
+              Password
+              <input id="enrollPassword" name="password" type="password" required minlength="6" placeholder="Min 6 characters" />
+            </label>
+            <button type="button" id="proceedToCameraBtn" class="primary">Proceed to Face Capture</button>
+          </div>
+          
+          <!-- Step 2: Face Capture -->
+          <div id="enrollmentStep2" class="stack hidden">
+            <div class="panel-heading">
+              <h3>Step 2: Face Capture</h3>
+              <button type="button" id="backToFormBtn" class="subtle-btn">← Back</button>
+            </div>
+            <p id="enrollmentPrompt" class="muted">Click "Start Capture" when ready. We'll guide you through 5 poses.</p>
+            <button type="button" id="startEnrollmentBtn" class="primary">Start Capture</button>
+            <button type="button" id="retryEnrollmentBtn" class="hidden">Retry Current Pose</button>
             <div class="progress-row">
               <progress id="enrollmentProgress" max="5" value="0"></progress>
               <span id="enrollmentCount">0 / 5</span>
             </div>
-          </form>
+            <div id="generatedUserIdCard" class="result-card hidden">
+              <h3>✓ Enrollment Complete!</h3>
+              <p class="muted">Your User ID (copy this for future logins):</p>
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <code id="generatedUserId" style="flex: 1; background: rgba(15, 23, 42, 0.8); padding: 8px; border-radius: 8px; word-break: break-all;"></code>
+                <button type="button" id="copyUserIdBtn" style="width: auto; padding: 8px 12px;">Copy</button>
+              </div>
+            </div>
+          </div>
         </section>
 
+        <!-- Attendance Session Panel -->
         <section class="panel">
           <div class="panel-heading">
-            <h2>2. Attendance Session</h2>
+            <h2>Attendance Session</h2>
             <span class="badge">Identity + passive monitoring</span>
           </div>
           <form id="attendanceForm" class="stack">
             <label>
               User ID
-              <input id="loginUserId" name="loginUserId" type="text" required />
+              <input id="loginUserId" name="loginUserId" type="text" required placeholder="Paste your User ID here" />
             </label>
             <label>
               Meeting URL
@@ -75,16 +104,17 @@
           </form>
         </section>
 
+        <!-- Camera Panel - Always visible during enrollment -->
         <section class="panel media-panel">
           <div class="panel-heading">
-            <h2>Camera</h2>
+            <h2>Camera Preview</h2>
             <span class="badge subtle">No raw media leaves this page</span>
           </div>
           <div class="camera-frame">
             <video id="video" autoplay muted playsinline></video>
             <canvas id="overlay" width="640" height="480" aria-hidden="true"></canvas>
           </div>
-          <p id="cameraHint" class="muted">Grant camera access to capture face embeddings locally.</p>
+          <p id="cameraHint" class="muted">Camera will activate when you proceed to face capture.</p>
         </section>
 
         <section class="panel wide">
