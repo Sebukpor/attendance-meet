@@ -1,6 +1,6 @@
-# Local Face Model Assets
+# Optional Local Model Assets
 
-Place the following `@vladmandic/face-api` model files in this folder for fully self-contained deployment:
+Place these `@vladmandic/face-api` model files here if you want Vercel to serve the browser models locally instead of using the CDN:
 
 - `ssd_mobilenetv1_model.bin`
 - `ssd_mobilenetv1_model-weights_manifest.json`
@@ -9,8 +9,6 @@ Place the following `@vladmandic/face-api` model files in this folder for fully 
 - `face_recognition_model.bin`
 - `face_recognition_model-weights_manifest.json`
 
-Source:
+Default source if this folder is empty:
 
 - https://cdn.jsdelivr.net/gh/vladmandic/face-api/model/
-
-The frontend checks this folder first and falls back to the official CDN if the files are not present.

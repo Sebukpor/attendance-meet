@@ -1,183 +1,152 @@
----
-title: MLAVS Production
-emoji: 🧠
-colorFrom: blue
-colorTo: indigo
-sdk: docker
-app_port: 7860
----
+# MLAVS Split Deployment
 
-# MLAVS Production
-
-MLAVS is a privacy-first attendance verification system that keeps face processing in the browser, sends only 128-dimensional embeddings to a FastAPI backend, and forwards structured audit events to Google Sheets through Google Apps Script.
-
-## Project Structure
+This project is organized into three independent deployment units:
 
 ```text
 mlavs-production/
-├── .dockerignore
-├── Dockerfile
-├── requirements.txt
-├── backend/
-│   ├── main.py
-│   └── requirements.txt
-├── frontend/
-│   ├── index.html
-│   ├── app.js
-│   ├── models/
-│   │   └── README.md
-│   └── styles.css
-├── google-apps-script/
-│   └── code.gs
-└── README.md
+|-- backend-huggingface/
+|   |-- main.py
+|   |-- Dockerfile
+|   `-- requirements.txt
+|-- frontend-vercel/
+|   |-- index.html
+|   |-- app.js
+|   |-- config.js
+|   |-- styles.css
+|   |-- vercel.json
+|   `-- models/
+|       `-- README.md
+|-- google-apps-script/
+|   `-- code.gs
+`-- README.md
 ```
 
-## What This Implements
+## Deploy Each Part
 
-- Multi-image enrollment with five guided poses and local face embedding generation.
-- Session start verification against multiple reference embeddings using cosine similarity.
-- Random attendance checkpoints every 8 to 15 minutes with browser confirmation and PIN fallback.
-- Passive monitoring with tab visibility and interaction counts batched every 10 seconds.
-- Final scoring using the required weights:
-  - `40%` identity confidence
-  - `30%` checkpoint completion rate
-  - `20%` session duration ratio normalized to a 3-hour cap
-  - `10%` behavioral consistency
-- Async Google Apps Script webhook dispatch for enrollment, verification failure, session start, checkpoint, and session end events.
+### 1. Hugging Face backend
 
-## Privacy and Security Notes
+Deploy only [backend-huggingface/main.py](/C:/Users/divin/OneDrive%20-%20Chandigarh%20University/Documents/New%20project/mlavs-production/backend-huggingface/main.py:1), [backend-huggingface/Dockerfile](/C:/Users/divin/OneDrive%20-%20Chandigarh%20University/Documents/New%20project/mlavs-production/backend-huggingface/Dockerfile:1), and [backend-huggingface/requirements.txt](/C:/Users/divin/OneDrive%20-%20Chandigarh%20University/Documents/New%20project/mlavs-production/backend-huggingface/requirements.txt:1) to a Docker Space.
 
-- Raw images and video never leave the browser. Only numeric embeddings and session metadata are sent to the backend.
-- The backend uses a single allowed CORS origin via `FRONTEND_ORIGIN`. Set this to your deployed frontend origin before production use.
-- Add HTTPS everywhere in deployment. Browser camera APIs and sensitive attendance events should never run over plain HTTP in production.
-- This starter keeps users and sessions in memory for portability. Do not use the in-memory stores for multi-instance or long-lived production deployments.
+Set these Hugging Face secrets:
 
-## Backend Setup
+- `FRONTEND_ORIGINS=https://your-vercel-app.vercel.app,https://your-custom-domain.com`
+- `GS_WEB_APP_URL=https://script.google.com/macros/s/your-web-app-id/exec`
+- `DRIVE_FOLDER_ID=your_drive_folder_id`
+- `MATCH_THRESHOLD=0.6`
 
-1. Create a virtual environment and install dependencies.
+Persistence model:
 
-```bash
-cd backend
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+- Google Sheets is the primary user registry.
+- Google Drive stores each user's biometric embedding file as private JSON.
+- The backend reads user records from Apps Script on registration, login, enrollment, and session verification.
+- Users now register with `username`, `email`, and `password`.
+- The backend auto-generates a copyable `user_id` for future login.
+
+### 2. Vercel frontend
+
+Deploy only the contents of [frontend-vercel](/C:/Users/divin/OneDrive%20-%20Chandigarh%20University/Documents/New%20project/mlavs-production/frontend-vercel:1) to Vercel as a static site.
+
+Before deploying, update [frontend-vercel/config.js](/C:/Users/divin/OneDrive%20-%20Chandigarh%20University/Documents/New%20project/mlavs-production/frontend-vercel/config.js:1):
+
+```js
+window.MLAVS_CONFIG = {
+  apiBase: "https://your-huggingface-space.hf.space/api/v1",
+  modelBase: "/models",
+  checkpointPin: "2468",
+};
 ```
 
-2. Set environment variables.
+User flow:
 
-```powershell
-$env:FRONTEND_ORIGIN="https://your-frontend.example"
-$env:GS_WEB_APP_URL="https://script.google.com/macros/s/your-web-app-id/exec"
-$env:DRIVE_FOLDER_ID="your_google_drive_folder_id"
-$env:MATCH_THRESHOLD="0.6"
-```
+1. Register with username, email, and password.
+2. Copy the generated `user_id`.
+3. Enroll biometrics once with that `user_id`.
+4. Log in later with `user_id + password`.
 
-3. Run the API locally.
+### 3. Google Apps Script
 
-```bash
-uvicorn main:app --host 0.0.0.0 --port 7860
-```
+Paste [google-apps-script/code.gs](/C:/Users/divin/OneDrive%20-%20Chandigarh%20University/Documents/New%20project/mlavs-production/google-apps-script/code.gs:1) into a Google Apps Script project bound to a Google Sheet and deploy it as a Web App.
 
-Available routes:
+If your spreadsheet is not bound to the Apps Script project, that is now supported too:
 
-- `POST /api/v1/enroll`
-- `POST /api/v1/login`
-- `POST /api/v1/start`
-- `POST /api/v1/checkpoint`
-- `POST /api/v1/passive`
-- `POST /api/v1/exit`
-- `GET /api/v1/health`
+- open [google-apps-script/code.gs](/C:/Users/divin/OneDrive%20-%20Chandigarh%20University/Documents/New%20project/mlavs-production/google-apps-script/code.gs:1)
+- set `SPREADSHEET_ID` to the target spreadsheet ID
+- make sure the Google account executing the Apps Script web app has edit access to that spreadsheet
+- make sure the same account also has access to the Drive folder referenced by `DRIVE_FOLDER_ID`
 
-## Frontend Setup
+Apps Script actions:
 
-1. Update `API_BASE` in [frontend/app.js](/C:/Users/divin/OneDrive%20-%20Chandigarh%20University/Documents/New%20project/mlavs-production/frontend/app.js:1) to your Hugging Face Space or local backend URL.
-2. Serve the `frontend/` directory with any static file server.
+- `register_user`
+- `upsert_user`
+- `get_user`
+- `log_event`
 
-```bash
-cd frontend
-python -m http.server 5500
-```
+Stored data:
 
-3. Open `http://localhost:5500`.
+- `MLAVS_Users` sheet:
+  - `user_id`
+  - `username`
+  - `email`
+  - `full_name`
+  - `active`
+  - `metadata JSON`
+  - `created_at`
+  - `updated_at`
+  - `embedding_file_id`
+  - `embedding_file_url`
+  - `average_quality_score`
+  - `capture_count`
+  - `password_hash`
+  - `password_salt`
+- Drive:
+  - one private JSON file per user for biometric embeddings
+- `MLAVS_Attendance` sheet:
+  - session and audit events
 
-Notes:
+## Camera and Google Meet
 
-- The app now uses the maintained `@vladmandic/face-api` browser bundle and the accuracy-oriented `ssdMobilenetv1` detector together with `faceLandmark68Net` and `faceRecognitionNet`.
-- The frontend first looks for local model assets under `frontend/models/` and falls back to the official CDN if they are missing.
-- The checkpoint PIN is hardcoded in the client as a demonstration fallback. Replace it with a server-issued one-time code flow before real deployment.
+- The app uses the webcam only during biometric enrollment and initial session verification.
+- Immediately after enrollment or successful verification, the frontend stops its own camera stream.
+- During the meeting itself, passive monitoring uses only tab visibility and interaction tracking, not the webcam.
+- If Google Meet is already holding the webcam and the browser/device does not allow sharing, the user should:
+  1. verify before turning Meet video on, or
+  2. briefly disable Meet video, complete verification, then continue after the app releases the camera.
 
-## Google Apps Script Setup
+This means the web app should not continuously fight with Meet for webcam access during the actual meeting.
 
-1. Open a new Apps Script project bound to a Google Sheet.
-2. Paste in [google-apps-script/code.gs](/C:/Users/divin/OneDrive%20-%20Chandigarh%20University/Documents/New%20project/mlavs-production/google-apps-script/code.gs:1).
-3. Create or note a Drive folder for audit JSON files.
-4. Deploy the script as:
-   - Execute as: `Me`
-   - Who has access: `Anyone with the link`
-5. Copy the deployed web app URL into `GS_WEB_APP_URL`.
+## Important Note About Spreadsheet URL
 
-The script will:
+You are correct: you do not need to insert a spreadsheet URL anywhere in the code.
 
-- Create the `MLAVS_Attendance` sheet if missing.
-- Freeze the header row.
-- Append a structured row for each event.
-- Write a lightweight JSON audit file to Drive when `drive_folder_id` is provided.
+What is required:
 
-## Hugging Face Spaces Deployment
+- the Google Apps Script web app URL in `GS_WEB_APP_URL`
+- the Drive folder ID in `DRIVE_FOLDER_ID`
 
-This repo is now prepared for a Docker Space. Hugging Face expects the YAML block at the top of this README and a root-level `Dockerfile`.
+Why:
 
-### Files added for Space deployment
+- the Apps Script is bound to its spreadsheet and uses that spreadsheet internally
+- the backend talks only to the Apps Script web app, not to the spreadsheet directly
 
-- [Dockerfile](/C:/Users/divin/OneDrive%20-%20Chandigarh%20University/Documents/New%20project/mlavs-production/Dockerfile:1)
-- [requirements.txt](/C:/Users/divin/OneDrive%20-%20Chandigarh%20University/Documents/New%20project/mlavs-production/requirements.txt:1)
-- [frontend/models/README.md](/C:/Users/divin/OneDrive%20-%20Chandigarh%20University/Documents/New%20project/mlavs-production/frontend/models/README.md:1)
+If you are using a non-bound spreadsheet:
 
-### How it works
+- you still do not need the spreadsheet URL
+- you need the spreadsheet ID in `code.gs`
+- the script accesses it with `SpreadsheetApp.openById(SPREADSHEET_ID)`
 
-- The container installs Python dependencies from the root `requirements.txt`.
-- FastAPI serves both the API and the static frontend on port `7860`.
-- If you include the model files inside `frontend/models/`, the Space can run without depending on the model CDN at runtime.
+## Hosting Notes
 
-Recommended environment variables in the Space settings:
+- The frontend uses the maintained `@vladmandic/face-api` browser package with `ssdMobilenetv1`, `faceLandmark68Net`, and `faceRecognitionNet`.
+- The frontend checks `/models` first and falls back to the official CDN if the model files are not present.
+- The checkpoint PIN remains demo-only in the frontend config. For production, move PIN generation and verification to the backend.
+- Because the frontend and backend are now on different origins, `FRONTEND_ORIGINS` must exactly include your Vercel origin.
+- Enrollment persistence depends on both `GS_WEB_APP_URL` and `DRIVE_FOLDER_ID`.
 
-- `FRONTEND_ORIGIN`
-- `GS_WEB_APP_URL`
-- `DRIVE_FOLDER_ID`
-- `MATCH_THRESHOLD`
+## Recommended Deployment Flow
 
-Use port `7860` for compatibility with Space defaults.
-
-### Deploy steps
-
-1. Create a new Hugging Face Space with `Docker` as the SDK.
-2. Push this project into the Space repo.
-3. Add secrets for `FRONTEND_ORIGIN`, `GS_WEB_APP_URL`, and `DRIVE_FOLDER_ID`.
-4. Optionally vendor the face model files into `frontend/models/` before pushing.
-5. Once built, your Space will serve the UI at `/` and the API under `/api/v1/*`.
-
-## Production Migration Path
-
-Move the demo in-memory stores to durable services before production:
-
-- Replace `users_store` with PostgreSQL plus `pgvector`, Pinecone, Weaviate, or another encrypted vector-capable store.
-- Replace `sessions_store` with PostgreSQL and Redis for distributed session state and checkpoint scheduling.
-- Add authentication and authorization with JWT or your SSO provider.
-- Move PIN fallback issuance and validation to the backend.
-- Add rate limiting, audit alerting, and observability with Prometheus, Grafana, and Sentry.
-- Add a real task queue for external logging retries if webhook delivery matters operationally.
-
-## Known Constraints
-
-- Browser `confirm()` dialogs are intentionally simple and portable, but they are not a polished UX. Replace them with accessible in-page modals for production.
-- `face-api.js` descriptor size may differ by model family. This implementation assumes 128-dimensional vectors per your specification.
-- `beforeunload` logging is best-effort. `navigator.sendBeacon()` improves reliability, but unexpected tab or browser crashes can still cause event loss.
-
-## Validation Checklist
-
-- Endpoints are typed with Pydantic v2 models and structured HTTP error handling.
-- Verification compares one live embedding against multiple stored reference embeddings.
-- Scoring weights exactly match `40/30/20/10`.
-- Passive monitoring relies on standard browser APIs only.
-- Checkpoints randomize between 8 and 15 minutes and include a PIN fallback path.
-- Google Apps Script creates the sheet automatically and logs all events without storing raw media.
+1. Deploy the Google Apps Script web app and copy its URL.
+2. Add the Apps Script URL and Drive folder ID to Hugging Face secrets.
+3. Deploy the backend to Hugging Face.
+4. Put the Hugging Face Space URL into `frontend-vercel/config.js`.
+5. Deploy the frontend to Vercel.
+6. Register a user, copy the generated user ID, enroll once, and then test a full session flow.

@@ -4,16 +4,13 @@ import logging
 import math
 import os
 import uuid
-from pathlib import Path
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 import httpx
 import numpy as np
 from fastapi import BackgroundTasks, FastAPI, HTTPException, status
-from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -30,11 +27,13 @@ DEFAULT_MATCH_THRESHOLD = float(os.getenv("MATCH_THRESHOLD", "0.6"))
 MAX_SESSION_SECONDS = 3 * 60 * 60
 CHECKPOINT_MINUTES_MIN = int(os.getenv("CHECKPOINT_MINUTES_MIN", "8"))
 CHECKPOINT_MINUTES_MAX = int(os.getenv("CHECKPOINT_MINUTES_MAX", "15"))
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5500")
 GS_WEB_APP_URL = os.getenv("GS_WEB_APP_URL", "").strip()
 DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "").strip()
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-FRONTEND_DIR = PROJECT_ROOT / "frontend"
+FRONTEND_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("FRONTEND_ORIGINS", "http://localhost:5500,http://localhost:3000").split(",")
+    if origin.strip()
+]
 
 WEIGHT_IDENTITY = 40.0
 WEIGHT_CHECKPOINTS = 30.0
@@ -49,8 +48,6 @@ class EmbeddingVector(BaseModel):
     @field_validator("values")
     @classmethod
     def validate_values(cls, values: list[float]) -> list[float]:
-        if not values:
-            raise ValueError("Embedding cannot be empty.")
         if not all(math.isfinite(value) for value in values):
             raise ValueError("Embedding contains non-finite values.")
         return values
@@ -84,7 +81,6 @@ class StartSessionRequest(BaseModel):
     user_id: str = Field(..., min_length=3, max_length=128)
     meeting_url: str = Field(..., min_length=10, max_length=2000)
     live_embedding: EmbeddingVector
-    checkpoint_pin: str | None = Field(default=None, min_length=4, max_length=12)
     meeting_title: str | None = Field(default=None, max_length=200)
 
 
@@ -114,20 +110,26 @@ class ExitRequest(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
-    users: int
     sessions: int
     gs_configured: bool
     drive_configured: bool
     checkpoint_window_minutes: tuple[int, int]
+    allowed_origins: list[str]
+    persistence_mode: str
 
 
 class UserRecord(BaseModel):
+    model_config = ConfigDict(extra="allow")
     user_id: str
     full_name: str
     embeddings: list[list[float]]
     average_quality_score: float
     active: bool = True
     created_at: datetime
+    updated_at: datetime | None = None
+    embedding_file_id: str | None = None
+    embedding_file_url: str | None = None
+    capture_count: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -154,14 +156,14 @@ class SessionRecord(BaseModel):
     last_checkpoint_at: datetime | None = None
 
 
-users_store: dict[str, UserRecord] = {}
 sessions_store: dict[str, SessionRecord] = {}
+user_cache: dict[str, UserRecord] = {}
 
 
-app = FastAPI(title=APP_NAME, version="1.0.0")
+app = FastAPI(title=APP_NAME, version="1.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN],
+    allow_origins=FRONTEND_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -170,6 +172,19 @@ app.add_middleware(
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def require_persistence_config() -> None:
+    if not GS_WEB_APP_URL:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="GS_WEB_APP_URL is required because Sheets and Drive are configured as the primary database.",
+        )
+    if not DRIVE_FOLDER_ID:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="DRIVE_FOLDER_ID is required because Drive stores enrolled embeddings.",
+        )
 
 
 def normalize_embedding(values: list[float]) -> np.ndarray:
@@ -187,13 +202,10 @@ def cosine_similarity(reference: np.ndarray, candidate: np.ndarray) -> float:
 def verify_against_references(candidate: list[float], references: list[list[float]]) -> dict[str, float]:
     candidate_vector = normalize_embedding(candidate)
     scores = [cosine_similarity(normalize_embedding(ref), candidate_vector) for ref in references]
-
     best_match = max(scores)
     average_similarity = float(np.mean(scores))
-    consistency_score = 1.0 - float(np.std(scores))
-    consistency_score = float(np.clip(consistency_score, 0.0, 1.0))
+    consistency_score = float(np.clip(1.0 - float(np.std(scores)), 0.0, 1.0))
     identity_confidence = float(np.clip((best_match * 0.7) + (average_similarity * 0.3), 0.0, 1.0))
-
     return {
         "best_match": best_match,
         "average_similarity": average_similarity,
@@ -209,11 +221,7 @@ def quality_summary(captures: list[EnrollmentCapture]) -> float:
 
 
 def behavioral_consistency(session: SessionRecord) -> float:
-    if session.total_tracked_seconds <= 0:
-        focus_ratio = 0.0
-    else:
-        focus_ratio = session.visible_seconds / session.total_tracked_seconds
-
+    focus_ratio = 0.0 if session.total_tracked_seconds <= 0 else session.visible_seconds / session.total_tracked_seconds
     normalized_focus = float(np.clip(focus_ratio, 0.0, 1.0))
     normalized_interactions = float(np.clip(session.interaction_count / 180.0, 0.0, 1.0))
     return float(np.clip((normalized_focus * 0.7) + (normalized_interactions * 0.3), 0.0, 1.0))
@@ -245,7 +253,6 @@ def final_session_score(session: SessionRecord) -> dict[str, float | str]:
     duration_component = session_duration_ratio(session) * WEIGHT_DURATION
     behavioral_component = behavioral_consistency(session) * WEIGHT_BEHAVIOR
     total = round(identity_component + checkpoint_component + duration_component + behavioral_component, 2)
-
     return {
         "identity_component": round(identity_component, 2),
         "checkpoint_component": round(checkpoint_component, 2),
@@ -256,52 +263,102 @@ def final_session_score(session: SessionRecord) -> dict[str, float | str]:
     }
 
 
-async def send_to_gs(event_type: str, payload: dict[str, Any]) -> None:
+async def gs_post(payload: dict[str, Any]) -> dict[str, Any]:
+    require_persistence_config()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(GS_WEB_APP_URL, json=payload)
+            response.raise_for_status()
+            return response.json()
+    except Exception as exc:
+        logger.exception("Google Apps Script request failed")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Primary database request to Google Apps Script failed: {exc}",
+        ) from exc
+
+
+async def fetch_user_from_store(user_id: str) -> UserRecord | None:
+    payload = await gs_post({"action": "get_user", "user_id": user_id})
+    if not payload.get("ok"):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=payload.get("error", "Failed to read user record."))
+    if not payload.get("found"):
+        return None
+    user = UserRecord.model_validate(payload["user"])
+    user_cache[user.user_id] = user
+    return user
+
+
+async def upsert_user_in_store(payload: EnrollRequest, average_quality_score: float) -> dict[str, Any]:
+    request_body = {
+        "action": "upsert_user",
+        "drive_folder_id": DRIVE_FOLDER_ID,
+        "user": {
+            "user_id": payload.user_id,
+            "full_name": payload.full_name,
+            "active": True,
+            "average_quality_score": round(average_quality_score, 4),
+            "capture_count": len(payload.captures),
+            "metadata": payload.metadata,
+            "embeddings": [capture.embedding.values for capture in payload.captures],
+        },
+    }
+    result = await gs_post(request_body)
+    if not result.get("ok"):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=result.get("error", "Failed to persist user record."))
+    user = UserRecord.model_validate(result["user"])
+    user_cache[user.user_id] = user
+    return result
+
+
+async def send_event_to_gs(event_type: str, payload: dict[str, Any]) -> None:
     if not GS_WEB_APP_URL:
         logger.info("GS webhook not configured; skipped event=%s", event_type)
         return
-
     event_payload = {
+        "action": "log_event",
         "event_type": event_type,
         "timestamp": utc_now().isoformat(),
         "drive_folder_id": DRIVE_FOLDER_ID,
         **payload,
     }
-
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            response = await client.post(GS_WEB_APP_URL, json=event_payload)
-            response.raise_for_status()
-    except Exception as exc:
-        logger.warning("Failed to send event to Google Apps Script: %s", exc)
+        await gs_post(event_payload)
+    except HTTPException as exc:
+        logger.warning("Failed to send event to Google Apps Script: %s", exc.detail)
 
 
 def dispatch_gs_event(event_type: str, payload: dict[str, Any], background_tasks: BackgroundTasks | None = None) -> None:
     if background_tasks is not None:
-        background_tasks.add_task(send_to_gs, event_type, payload)
+        background_tasks.add_task(send_event_to_gs, event_type, payload)
         return
-
     try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(send_to_gs(event_type, payload))
+        asyncio.get_running_loop().create_task(send_event_to_gs(event_type, payload))
     except RuntimeError:
         logger.warning("No running event loop for GS dispatch; event=%s", event_type)
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> dict[str, str]:
+    return {"message": f"{APP_NAME} is running.", "health": f"{API_PREFIX}/health"}
 
 
 @app.get(f"{API_PREFIX}/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(
         status="ok",
-        users=len(users_store),
         sessions=len(sessions_store),
         gs_configured=bool(GS_WEB_APP_URL),
         drive_configured=bool(DRIVE_FOLDER_ID),
         checkpoint_window_minutes=(CHECKPOINT_MINUTES_MIN, CHECKPOINT_MINUTES_MAX),
+        allowed_origins=FRONTEND_ORIGINS,
+        persistence_mode="google_sheets_and_drive_primary",
     )
 
 
 @app.post(f"{API_PREFIX}/enroll", status_code=status.HTTP_201_CREATED)
 async def enroll_user(payload: EnrollRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    require_persistence_config()
     enrollment_quality = quality_summary(payload.captures)
     if enrollment_quality < 0.55:
         raise HTTPException(
@@ -309,15 +366,7 @@ async def enroll_user(payload: EnrollRequest, background_tasks: BackgroundTasks)
             detail="Enrollment quality too low. Capture clearer, better-lit reference samples.",
         )
 
-    embeddings = [capture.embedding.values for capture in payload.captures]
-    users_store[payload.user_id] = UserRecord(
-        user_id=payload.user_id,
-        full_name=payload.full_name,
-        embeddings=embeddings,
-        average_quality_score=enrollment_quality,
-        created_at=utc_now(),
-        metadata=payload.metadata,
-    )
+    store_result = await upsert_user_in_store(payload, enrollment_quality)
 
     dispatch_gs_event(
         "user_enrollment",
@@ -327,24 +376,38 @@ async def enroll_user(payload: EnrollRequest, background_tasks: BackgroundTasks)
             "capture_count": len(payload.captures),
             "average_quality_score": round(enrollment_quality, 4),
             "metadata": payload.metadata,
+            "embedding_file_id": store_result["user"].get("embedding_file_id"),
+            "embedding_file_url": store_result["user"].get("embedding_file_url"),
         },
         background_tasks,
     )
 
     return {
-        "message": "Enrollment completed.",
+        "message": "Enrollment completed and persisted to Sheets/Drive.",
         "user_id": payload.user_id,
         "capture_count": len(payload.captures),
         "average_quality_score": round(enrollment_quality, 4),
-        "production_note": "In production, move user embeddings to PostgreSQL + pgvector or another encrypted vector store.",
+        "embedding_file_id": store_result["user"].get("embedding_file_id"),
+        "embedding_file_url": store_result["user"].get("embedding_file_url"),
     }
 
 
 @app.post(f"{API_PREFIX}/login")
-async def login_user(payload: LoginRequest) -> dict[str, Any]:
-    user = users_store.get(payload.user_id)
+async def login_user(payload: LoginRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    require_persistence_config()
+    user = await fetch_user_from_store(payload.user_id)
     if not user or not user.active:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found or inactive.")
+
+    dispatch_gs_event(
+        "login_lookup",
+        {
+            "user_id": user.user_id,
+            "full_name": user.full_name,
+            "embedding_file_id": user.embedding_file_id,
+        },
+        background_tasks,
+    )
 
     return {
         "message": "User is eligible to start attendance verification.",
@@ -352,12 +415,14 @@ async def login_user(payload: LoginRequest) -> dict[str, Any]:
         "full_name": user.full_name,
         "enrolled_embeddings": len(user.embeddings),
         "average_quality_score": round(user.average_quality_score, 4),
+        "embedding_file_id": user.embedding_file_id,
     }
 
 
 @app.post(f"{API_PREFIX}/start", status_code=status.HTTP_201_CREATED)
 async def start_session(payload: StartSessionRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
-    user = users_store.get(payload.user_id)
+    require_persistence_config()
+    user = await fetch_user_from_store(payload.user_id)
     if not user or not user.active:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found or inactive.")
 
@@ -474,10 +539,7 @@ async def update_passive_monitoring(payload: PassiveMonitoringRequest) -> dict[s
     session.last_passive_at = utc_now()
     session.updated_at = utc_now()
 
-    focus_ratio = 0.0
-    if session.total_tracked_seconds > 0:
-        focus_ratio = session.visible_seconds / session.total_tracked_seconds
-
+    focus_ratio = 0.0 if session.total_tracked_seconds <= 0 else session.visible_seconds / session.total_tracked_seconds
     return {
         "message": "Passive metrics updated.",
         "focus_ratio": round(float(np.clip(focus_ratio, 0.0, 1.0)), 4),
@@ -520,23 +582,7 @@ async def exit_session(payload: ExitRequest, background_tasks: BackgroundTasks) 
         background_tasks,
     )
 
-    return {
-        "message": "Session ended.",
-        "session_id": session.session_id,
-        **score_breakdown,
-    }
-
-
-@app.get("/", include_in_schema=False)
-async def root() -> FileResponse:
-    index_path = FRONTEND_DIR / "index.html"
-    if not index_path.exists():
-        raise HTTPException(status_code=404, detail="Frontend not found.")
-    return FileResponse(index_path)
-
-
-if FRONTEND_DIR.exists():
-    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+    return {"message": "Session ended.", "session_id": session.session_id, **score_breakdown}
 
 
 if __name__ == "__main__":

@@ -1,11 +1,12 @@
-const API_BASE = "http://localhost:7860/api/v1";
-const LOCAL_MODEL_URL = "/models";
+const APP_CONFIG = window.MLAVS_CONFIG || {};
+const API_BASE = (APP_CONFIG.apiBase || "https://sebukpor-attendance.hf.space/api/v1").replace(/\/$/, "");
+const LOCAL_MODEL_URL = (APP_CONFIG.modelBase || "/models").replace(/\/$/, "");
 const CDN_MODEL_URL = "https://cdn.jsdelivr.net/gh/vladmandic/face-api/model";
 const ENROLLMENT_POSES = ["front", "left", "right", "up", "down"];
 const PASSIVE_FLUSH_MS = 10_000;
 const CHECKPOINT_MIN_MS = 8 * 60 * 1000;
 const CHECKPOINT_MAX_MS = 15 * 60 * 1000;
-const CHECKPOINT_PIN = "2468";
+const CHECKPOINT_PIN = APP_CONFIG.checkpointPin || "2468";
 const SSD_OPTIONS = { minConfidence: 0.5, maxResults: 1 };
 
 const state = {
@@ -14,7 +15,6 @@ const state = {
   enrollmentCaptures: [],
   enrollmentIndex: 0,
   sessionId: null,
-  sessionStartedAt: null,
   passive: {
     visibleSeconds: 0,
     totalSeconds: 0,
@@ -56,7 +56,11 @@ const elements = {
 async function boot() {
   bindUI();
   await Promise.all([loadModels(), checkHealth()]);
-  await ensureCamera();
+  try {
+    await ensureCamera();
+  } catch (error) {
+    console.warn("Camera not ready during boot.", error);
+  }
 }
 
 function bindUI() {
@@ -86,11 +90,7 @@ function bindUI() {
     if (!state.sessionId) {
       return;
     }
-
-    const payload = JSON.stringify({
-      session_id: state.sessionId,
-      ended_by: "beforeunload",
-    });
+    const payload = JSON.stringify({ session_id: state.sessionId, ended_by: "beforeunload" });
     navigator.sendBeacon(`${API_BASE}/exit`, new Blob([payload], { type: "application/json" }));
   });
 }
@@ -105,8 +105,20 @@ async function loadModels() {
     showToast(`Face models loaded from ${modelBase.startsWith("/") ? "local assets" : "CDN"}.`);
   } catch (error) {
     console.error(error);
-    showToast("Could not load face models. Add local model assets under frontend/models or check network access.", true);
+    showToast("Could not load face models. Add local assets under /models or keep CDN access enabled.", true);
   }
+}
+
+async function resolveModelBase() {
+  try {
+    const response = await fetch(`${LOCAL_MODEL_URL}/ssd_mobilenetv1_model-weights_manifest.json`, { method: "HEAD" });
+    if (response.ok) {
+      return LOCAL_MODEL_URL;
+    }
+  } catch (error) {
+    console.warn("Local models unavailable, falling back to CDN.", error);
+  }
+  return CDN_MODEL_URL;
 }
 
 async function ensureCamera() {
@@ -114,20 +126,13 @@ async function ensureCamera() {
     return state.stream;
   }
 
-  try {
-    state.stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 640, height: 480, facingMode: "user" },
-      audio: false,
-    });
-    elements.video.srcObject = state.stream;
-    elements.cameraHint.textContent = "Camera ready. Embeddings are generated in-browser only.";
-    return state.stream;
-  } catch (error) {
-    console.error(error);
-    elements.cameraHint.textContent =
-      "Camera unavailable. Enrollment and face verification need camera permission, but PIN fallback will remain available for checkpoints.";
-    throw error;
-  }
+  state.stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: 640, height: 480, facingMode: "user" },
+    audio: false,
+  });
+  elements.video.srcObject = state.stream;
+  elements.cameraHint.textContent = "Camera ready. Embeddings are generated in-browser only.";
+  return state.stream;
 }
 
 async function checkHealth() {
@@ -138,7 +143,7 @@ async function checkHealth() {
     elements.healthHint.textContent = `Users: ${data.users} | Sessions: ${data.sessions}`;
   } catch (error) {
     elements.healthStatus.textContent = "OFFLINE";
-    elements.healthHint.textContent = "Backend unreachable. Update API_BASE if needed.";
+    elements.healthHint.textContent = "Backend unreachable. Update frontend-vercel/config.js with your HF API URL.";
   }
 }
 
@@ -148,7 +153,6 @@ async function handleLoginStatus() {
     showToast("Enter a user ID first.", true);
     return;
   }
-
   try {
     const response = await request("/login", {
       method: "POST",
@@ -168,7 +172,13 @@ async function handleEnrollmentFlow() {
     return;
   }
 
-  await ensureCamera();
+  try {
+    await ensureCamera();
+  } catch (error) {
+    handleError(new Error("Camera access is required for enrollment."));
+    return;
+  }
+
   state.enrollmentCaptures = [];
   state.enrollmentIndex = 0;
   elements.startEnrollmentBtn.disabled = true;
@@ -178,15 +188,12 @@ async function handleEnrollmentFlow() {
     for (const pose of ENROLLMENT_POSES) {
       elements.enrollmentPrompt.textContent = `Align your face for the "${pose}" capture, then stay still for a moment.`;
       const detection = await captureFaceDescriptor();
-      const qualityScore = scoreCaptureQuality(detection);
-
       state.enrollmentCaptures.push({
         pose,
         embedding: { values: Array.from(detection.descriptor) },
-        quality_score: qualityScore,
+        quality_score: scoreCaptureQuality(detection),
         detection_score: detection.detection.score,
       });
-
       state.enrollmentIndex += 1;
       elements.enrollmentProgress.value = state.enrollmentIndex;
       elements.enrollmentCount.textContent = `${state.enrollmentIndex} / ${ENROLLMENT_POSES.length}`;
@@ -229,9 +236,8 @@ async function handleAttendanceStart() {
     return;
   }
 
-  await ensureCamera();
-
   try {
+    await ensureCamera();
     updateBadge("Verifying identity");
     const detection = await captureFaceDescriptor();
     const response = await request("/start", {
@@ -245,7 +251,6 @@ async function handleAttendanceStart() {
     });
 
     state.sessionId = response.session_id;
-    state.sessionStartedAt = Date.now();
     resetPassiveMetrics();
     elements.sessionIdValue.textContent = state.sessionId;
     elements.identityValue.textContent = `${Math.round(response.identity_confidence * 100)}%`;
@@ -273,38 +278,21 @@ async function captureFaceDescriptor() {
       .detectSingleFace(elements.video, new faceapi.SsdMobilenetv1Options(SSD_OPTIONS))
       .withFaceLandmarks()
       .withFaceDescriptor();
-
     drawOverlay(lastDetection);
     if (lastDetection) {
       return lastDetection;
     }
     await wait(500);
   }
-
   throw new Error("No face detected. Make sure one face is centered and well lit.");
 }
 
-async function resolveModelBase() {
-  try {
-    const response = await fetch(`${LOCAL_MODEL_URL}/ssd_mobilenetv1_model-weights_manifest.json`, { method: "HEAD" });
-    if (response.ok) {
-      return LOCAL_MODEL_URL;
-    }
-  } catch (error) {
-    console.warn("Local model assets unavailable, falling back to CDN.", error);
-  }
-
-  return CDN_MODEL_URL;
-}
-
 function drawOverlay(detection) {
-  const canvas = elements.overlay;
-  const context = canvas.getContext("2d");
-  context.clearRect(0, 0, canvas.width, canvas.height);
+  const context = elements.overlay.getContext("2d");
+  context.clearRect(0, 0, elements.overlay.width, elements.overlay.height);
   if (!detection) {
     return;
   }
-
   const { box } = detection.detection;
   context.strokeStyle = "#36d399";
   context.lineWidth = 3;
@@ -316,7 +304,6 @@ function scoreCaptureQuality(detection) {
   const descriptor = Array.from(detection.descriptor);
   const descriptorStdDev = standardDeviation(descriptor);
   const boxCoverage = Math.min((box.width * box.height) / (640 * 480), 1);
-
   const coverageScore = clamp(boxCoverage / 0.18, 0, 1);
   const varianceScore = clamp(descriptorStdDev / 0.12, 0, 1);
   const confidenceScore = clamp(detection.detection.score, 0, 1);
@@ -338,7 +325,6 @@ function startPassiveMonitoring() {
     if (!state.sessionId) {
       return;
     }
-
     try {
       const response = await request("/passive", {
         method: "POST",
@@ -378,8 +364,7 @@ function resetPassiveMetrics() {
 
 function scheduleNextCheckpoint() {
   clearScheduledCheckpoint();
-  const nextDelay = randomInt(CHECKPOINT_MIN_MS, CHECKPOINT_MAX_MS);
-  state.checkpointTimeoutId = window.setTimeout(runCheckpoint, nextDelay);
+  state.checkpointTimeoutId = window.setTimeout(runCheckpoint, randomInt(CHECKPOINT_MIN_MS, CHECKPOINT_MAX_MS));
 }
 
 function clearScheduledCheckpoint() {
@@ -396,7 +381,6 @@ async function runCheckpoint() {
 
   playCheckpointTone();
   const confirmed = window.confirm("Attendance checkpoint: click OK to confirm you are still present.");
-
   if (confirmed) {
     try {
       await request("/checkpoint", {
@@ -420,7 +404,6 @@ async function runCheckpoint() {
 
   const enteredPin = window.prompt("Camera unavailable or confirmation skipped. Enter your attendance PIN:");
   const pinSuccess = enteredPin === CHECKPOINT_PIN;
-
   try {
     await request("/checkpoint", {
       method: "POST",
@@ -432,12 +415,7 @@ async function runCheckpoint() {
         notes: pinSuccess ? "PIN fallback accepted." : "Checkpoint missed or invalid PIN.",
       }),
     });
-
-    if (!pinSuccess) {
-      showToast("Checkpoint failed. This will affect the final attendance score.", true);
-    } else {
-      showToast("PIN fallback accepted.");
-    }
+    showToast(pinSuccess ? "PIN fallback accepted." : "Checkpoint failed. This will affect the final attendance score.", !pinSuccess);
   } catch (error) {
     handleError(error);
   } finally {
@@ -456,12 +434,8 @@ async function endSession(reason) {
   try {
     const response = await request("/exit", {
       method: "POST",
-      body: JSON.stringify({
-        session_id: state.sessionId,
-        ended_by: reason,
-      }),
+      body: JSON.stringify({ session_id: state.sessionId, ended_by: reason }),
     });
-
     renderResult({
       title: response.status,
       status: `${response.final_score}%`,
@@ -487,7 +461,7 @@ function stopCameraStream() {
   state.stream.getTracks().forEach((track) => track.stop());
   state.stream = null;
   elements.video.srcObject = null;
-  elements.cameraHint.textContent = "Camera released after verification. Passive monitoring remains active without video.";
+  elements.cameraHint.textContent = "Camera released after verification. Passive monitoring continues without video.";
 }
 
 function playCheckpointTone() {
@@ -506,6 +480,23 @@ function playCheckpointTone() {
   } catch (error) {
     console.warn("Audio notification unavailable.", error);
   }
+}
+
+async function request(path, options) {
+  const response = await fetch(`${API_BASE}${path}`, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  const isJson = response.headers.get("content-type")?.includes("application/json");
+  const payload = isJson ? await response.json() : await response.text();
+  if (!response.ok) {
+    const message =
+      typeof payload === "object"
+        ? payload.detail?.message || payload.detail || payload.message || "Request failed."
+        : payload || "Request failed.";
+    throw new Error(message);
+  }
+  return payload;
 }
 
 function renderResult({ title, status, body }) {
@@ -527,28 +518,6 @@ function updateFocusUI() {
   }
   const ratio = Math.round((state.passive.visibleSeconds / state.passive.totalSeconds) * 100);
   elements.focusValue.textContent = `${ratio}%`;
-}
-
-async function request(path, options) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-    },
-    ...options,
-  });
-
-  const isJson = response.headers.get("content-type")?.includes("application/json");
-  const payload = isJson ? await response.json() : await response.text();
-
-  if (!response.ok) {
-    const message =
-      typeof payload === "object"
-        ? payload.detail?.message || payload.detail || payload.message || "Request failed."
-        : payload || "Request failed.";
-    throw new Error(message);
-  }
-
-  return payload;
 }
 
 function showToast(message, isError = false) {

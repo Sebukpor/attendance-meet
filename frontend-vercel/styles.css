@@ -9,7 +9,6 @@
   --accent: #38bdf8;
   --accent-strong: #0ea5e9;
   --success: #36d399;
-  --warning: #fbbf24;
   --danger: #fb7185;
   --shadow: 0 20px 45px rgba(15, 23, 42, 0.35);
   --radius: 20px;
@@ -99,10 +98,6 @@ body {
 
 .wide {
   grid-column: 1 / -1;
-}
-
-.media-panel {
-  min-height: 100%;
 }
 
 .panel-heading {
