@@ -499,7 +499,7 @@ async function loadModelsIfNeeded() {
     const modelBase = window.MLAVS_CONFIG.modelBase;
     console.log('Loading models from:', modelBase);
     
-    // Use the vladmandic face-api fork's API (no .nets namespace)
+    // Official face-api.js 0.22.2 uses direct properties, not .nets namespace
     await Promise.all([
       faceapi.ssdMobilenetv1.loadFromUri(modelBase),
       faceapi.faceLandmark68Net.loadFromUri(modelBase),
