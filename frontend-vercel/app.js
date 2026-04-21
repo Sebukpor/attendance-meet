@@ -482,6 +482,19 @@
   async function loadModelsIfNeeded() {
     if (modelsLoaded) return;
 
+    // Wait for faceapi to be available
+    if (typeof faceapi === 'undefined') {
+      console.log('Waiting for faceapi library to load...');
+      await new Promise((resolve) => {
+        const checkInterval = setInterval(() => {
+          if (typeof faceapi !== 'undefined') {
+            clearInterval(checkInterval);
+            resolve();
+          }
+        }, 100);
+      });
+    }
+
     try {
       const modelBase = window.MLAVS_CONFIG.modelBase;
       await Promise.all([
