@@ -496,14 +496,15 @@ async function loadModelsIfNeeded() {
   }
 
   try {
-    const modelBase = window.MLAVS_CONFIG.modelBase;
+    // Use local models directory for reliability
+    const modelBase = './models';
     console.log('Loading models from:', modelBase);
     
-    // Official face-api.js 0.22.2 uses direct properties, not .nets namespace
+    // Load models using the correct API for face-api.js 0.22.2
     await Promise.all([
-      faceapi.ssdMobilenetv1.loadFromUri(modelBase),
-      faceapi.faceLandmark68Net.loadFromUri(modelBase),
-      faceapi.faceRecognitionNet.loadFromUri(modelBase)
+      faceapi.nets.ssdMobilenetv1.loadFromUri(modelBase),
+      faceapi.nets.faceLandmark68Net.loadFromUri(modelBase),
+      faceapi.nets.faceRecognitionNet.loadFromUri(modelBase)
     ]);
     
     modelsLoaded = true;
