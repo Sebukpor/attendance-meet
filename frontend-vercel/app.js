@@ -479,11 +479,17 @@ async function loadModelsIfNeeded() {
   // Wait for faceapi library to be fully loaded
   if (typeof faceapi === 'undefined' || !faceapi.nets) {
     console.log('Waiting for faceapi library...');
-    await new Promise((resolve) => {
+    await new Promise((resolve, reject) => {
+      let attempts = 0;
+      const maxAttempts = 50; // 5 seconds total
       const check = setInterval(() => {
+        attempts++;
         if (typeof faceapi !== 'undefined' && faceapi.nets) {
           clearInterval(check);
           resolve();
+        } else if (attempts >= maxAttempts) {
+          clearInterval(check);
+          reject(new Error('faceapi library failed to load after ' + maxAttempts + ' attempts'));
         }
       }, 100);
     });
@@ -491,6 +497,7 @@ async function loadModelsIfNeeded() {
 
   try {
     const modelBase = window.MLAVS_CONFIG.modelBase;
+    console.log('Loading models from:', modelBase);
     
     await Promise.all([
       faceapi.nets.ssdMobilenetv1.loadFromUri(modelBase),
@@ -499,7 +506,7 @@ async function loadModelsIfNeeded() {
     ]);
     
     modelsLoaded = true;
-    console.log('✓ Models loaded from:', modelBase);
+    console.log('✓ Models loaded successfully from:', modelBase);
   } catch (err) {
     console.error('Model loading error:', err);
     throw new Error('Failed to load face recognition models: ' + err.message);
@@ -553,4 +560,7 @@ if (document.readyState === 'loading') {
 } else {
   init();
 }
+
+// Expose for debugging
+window.MLAVS = { init, loadModelsIfNeeded };
 })();
