@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MLAVS Attendance Verification</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Multi-Layer Attendance Verification System</p>
+        <h1>MLAVS Attendance Verification</h1>
+        <p class="hero-copy">
+          Secure attendance verification that stays inside the browser.
+          Enroll once, verify quickly, and monitor attendance with privacy-first face embeddings,
+          passive behavior signals, and checkpoint prompts.
+        </p>
+      </div>
+      <div class="status-card">
+        <div class="status-label">API Status</div>
+        <div id="healthStatus" class="badge muted-badge">Checking...</div>
+        <div id="healthHint" class="muted" style="margin-top:6px;font-size:0.8rem;">Waiting for backend</div>
+      </div>
+    </header>
+
+    <main class="grid">
+      <!-- ENROLLMENT PANEL -->
+      <section class="panel wide" id="enrollmentPanel">
+        <div class="panel-heading">
+          <h2>Enrollment</h2>
+          <span id="enrollmentStepNum" class="badge">Step 1 of 2</span>
+        </div>
+
+        <!-- Step 1: Info -->
+        <div id="enrollmentStep1" class="stack">
+          <label>Full Name <input id="enrollFullName" type="text" placeholder="Jane Doe" required /></label>
+          <label>Email <input id="enrollEmail" type="email" placeholder="jane@example.com" required /></label>
+          <label>Password <input id="enrollPassword" type="password" placeholder="Min 6 chars" required /></label>
+          <button id="proceedToCameraBtn" class="primary">Proceed to Face Capture</button>
+        </div>
+
+        <!-- Step 2: Camera -->
+        <div id="enrollmentStep2" class="stack hidden">
+          <p id="enrollmentPrompt" class="muted" style="margin:0;">Position your face in the center. Good lighting helps.</p>
+          <div class="camera-frame">
+            <video id="enrollVideo" autoplay playsinline muted></video>
+            <canvas id="enrollOverlay" style="display:none;"></canvas>
+          </div>
+          <div class="progress-row">
+            <progress id="enrollmentProgress" value="0" max="5"></progress>
+            <span id="enrollmentCount" class="muted">0 / 5</span>
+          </div>
+          <button id="startEnrollmentBtn" class="primary">Start Capture</button>
+          <button id="retryEnrollmentBtn" class="hidden subtle-btn">Retry Current Pose</button>
+        </div>
+
+        <div id="generatedUserIdCard" class="result-card hidden">
+          <h3>✓ Enrollment Complete!</h3>
+          <p>Your User ID (copy this for future logins):</p>
+          <code id="generatedUserId" style="word-break:break-all;"></code>
+          <button id="copyUserIdBtn" class="subtle-btn" style="margin-top:8px;">Copy</button>
+        </div>
+      </section>
+
+      <!-- ATTENDANCE PANEL -->
+      <section class="panel" id="attendancePanel">
+        <div class="panel-heading">
+          <h2>Attendance Session</h2>
+          <span id="sessionBadge" class="badge muted-badge">Idle</span>
+        </div>
+        <p class="muted" style="margin:0 0 12px;">Identity + passive monitoring</p>
+        
+        <div class="stack">
+          <label>User ID <input id="loginUserId" type="text" placeholder="user_xxxxx" required /></label>
+          <label>Password <input id="loginPassword" type="password" placeholder="Your password" required /></label>
+          <label>Meeting URL <input id="meetingUrl" type="url" placeholder="https://meet.example.com/..." required /></label>
+          <label>Meeting Title <input id="meetingTitle" type="text" placeholder="Optional" /></label>
+          
+          <div style="display:flex;gap:10px;">
+            <button id="loginBtn" class="primary" style="flex:1;">Login & Verify</button>
+            <button id="startAttendanceBtn" class="primary" disabled style="flex:1;">Start Session</button>
+          </div>
+          <button id="endSessionBtn" class="danger" disabled>End Session</button>
+        </div>
+
+        <div class="camera-frame" style="margin-top:16px;">
+          <video id="attendanceVideo" autoplay playsinline muted style="display:none;"></video>
+          <div id="cameraHint" class="muted" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">
+            Camera will activate when you proceed.
+          </div>
+        </div>
+      </section>
+
+      <!-- STATS PANEL -->
+      <section class="panel">
+        <div class="panel-heading"><h3>Live Metrics</h3></div>
+        <div class="stats">
+          <div>
+            <span class="stats-label">Session ID</span>
+            <strong id="sessionIdValue">-</strong>
+          </div>
+          <div>
+            <span class="stats-label">Identity Confidence</span>
+            <strong id="identityValue">-</strong>
+          </div>
+          <div>
+            <span class="stats-label">Focus Ratio</span>
+            <strong id="focusValue">-</strong>
+          </div>
+          <div>
+            <span class="stats-label">Interactions</span>
+            <strong id="interactionValue">0</strong>
+          </div>
+        </div>
+        <p class="muted" style="font-size:0.8rem;">No raw media leaves this page. All processing occurs on the secure backend.</p>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

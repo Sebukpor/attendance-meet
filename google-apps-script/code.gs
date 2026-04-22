@@ -98,12 +98,12 @@ function registerUser_(payload) {
       capture_count: Number(userPayload.capture_count || 0),
       embedding_file_id: "",
       embedding_file_url: "",
-      password_hash: userPayload.password_hash || "",
-      password_salt: userPayload.password_salt || "",
+      // 🔐 Security: omit password_hash/salt from response
     },
   };
 }
 
+// ✅ PATCHED: True upsert - creates user if not found
 function upsertUser_(payload) {
   const userPayload = payload.user || {};
   const userId = String(userPayload.user_id || "").trim();
@@ -113,15 +113,19 @@ function upsertUser_(payload) {
 
   const usersSheet = getOrCreateUsersSheet_();
   const existingRow = findUserRow_(usersSheet, userId);
+  const nowIso = new Date().toISOString();
+  
+  // ✅ NEW: Create user if not found (true upsert behavior)
   if (!existingRow) {
-    throw new Error("User not found. Register first.");
+    return registerUser_(payload);
   }
 
+  // ✅ Existing update logic with bug fixes
   const embeddingFile = upsertEmbeddingFile_(payload.drive_folder_id, userPayload);
-  const nowIso = new Date().toISOString();
   const existingCreatedAt = usersSheet.getRange(existingRow, 7).getValue();
   const existingUsername = usersSheet.getRange(existingRow, 2).getValue();
   const existingEmail = usersSheet.getRange(existingRow, 3).getValue();
+  const existingFullName = usersSheet.getRange(existingRow, 4).getValue(); // ✅ Fixed: get correct column
   const existingPasswordHash = usersSheet.getRange(existingRow, 13).getValue();
   const existingPasswordSalt = usersSheet.getRange(existingRow, 14).getValue();
 
@@ -129,7 +133,7 @@ function upsertUser_(payload) {
     userId,
     userPayload.username || existingUsername || "",
     userPayload.email || existingEmail || "",
-    userPayload.full_name || existingUsername || "",
+    userPayload.full_name || existingFullName || "", // ✅ Fixed: use existingFullName
     userPayload.active !== false,
     JSON.stringify(userPayload.metadata || {}),
     existingCreatedAt || nowIso,
@@ -151,7 +155,7 @@ function upsertUser_(payload) {
       user_id: userId,
       username: userPayload.username || existingUsername || "",
       email: userPayload.email || existingEmail || "",
-      full_name: userPayload.full_name || existingUsername || "",
+      full_name: userPayload.full_name || existingFullName || "", // ✅ Fixed
       active: userPayload.active !== false,
       average_quality_score: Number(userPayload.average_quality_score || 0),
       capture_count: Number(userPayload.capture_count || 0),
@@ -161,8 +165,7 @@ function upsertUser_(payload) {
       updated_at: nowIso,
       embedding_file_id: embeddingFile.getId(),
       embedding_file_url: embeddingFile.getUrl(),
-      password_hash: userPayload.password_hash || existingPasswordHash || "",
-      password_salt: userPayload.password_salt || existingPasswordSalt || "",
+      // 🔐 Security: omit password_hash/salt from response
     },
   };
 }
@@ -201,9 +204,8 @@ function getUser_(payload) {
       embedding_file_url: row[9],
       average_quality_score: Number(row[10] || 0),
       capture_count: Number(row[11] || 0),
-      password_hash: row[12] || "",
-      password_salt: row[13] || "",
       embeddings: embeddingPayload.embeddings || [],
+      // 🔐 Security: omit password_hash/salt from response
     },
   };
 }
@@ -295,7 +297,7 @@ function buildAttendanceRow_(payload, auditUrl) {
     payload.checkpoint_completed || "",
     payload.checkpoint_total || "",
     payload.visible_seconds || "",
-    payload.total_tracked_seconds || "",
+    payload.total_tracked_seconds || payload.total_seconds || "", // ✅ Handle both field names
     payload.interaction_count || "",
     auditUrl,
     JSON.stringify(payload),
