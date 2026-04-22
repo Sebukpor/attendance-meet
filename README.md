@@ -482,19 +482,3 @@ def final_session_score(session):
    - Check folder sharing permissions
 
 ---
-
-## 📝 License
-
-[Add your license information here]
-
----
-
-## 👥 Contributing
-
-[Add contribution guidelines here]
-
----
-
-## 📞 Support
-
-For issues or questions, please open an issue in the repository.
