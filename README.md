@@ -305,52 +305,6 @@ Stores user registration data:
 | N | Password Salt | Password salt |
 
 ---
-
-## ❓ Attendance Marking Flow - Detailed Answer
-
-### Question: "If a user logs in after sign up and the image possesses token corresponding with that used during registration, is their attendance marked as present?"
-
-### Answer: **NO** - Login alone does NOT mark attendance.
-
-Here's the complete flow:
-
-```
-1. SIGN UP (Enroll)
-   └─▶ User submits 3-10 face images + password
-   └─▶ Embeddings stored in Google Drive
-   └─▶ User record created in MLAVS_Users sheet
-   └─❌ NO attendance record created yet
-
-2. LOGIN
-   └─▶ User provides user_id + password
-   └─▶ System verifies credentials
-   └─▶ Returns: "User is eligible to start attendance verification"
-   └─❌ STILL NO attendance record marked as present
-
-3. START SESSION
-   └─▶ User MUST upload a LIVE photo
-   └─▶ System compares live photo against enrolled embeddings
-   └─▶ If match ≥ 0.6 threshold → session starts
-   └─▶ Logs "session_start" event to MLAVS_Attendance sheet
-   └─⚠️ Status column is EMPTY at this point
-
-4. DURING SESSION
-   └─▶ Periodic checkpoints verify continued presence
-   └─▶ Passive monitoring tracks visibility/engagement
-   └─⚠️ Still no final attendance status
-
-5. EXIT SESSION ✅
-   └─▶ User ends session (or timeout/admin)
-   └─▶ System calculates final score based on:
-       • Identity confidence (40%)
-       • Checkpoint completion (30%)
-       • Duration (20%)
-       • Behavior (10%)
-   └─▶ Assigns status: "Fully Present", "Partially Present", or "Non-Compliant"
-   └─✅ LOGS "session_end" event WITH STATUS to MLAVS_Attendance sheet
-   └─✅ THIS IS WHEN ATTENDANCE IS OFFICIALLY MARKED
-```
-
 ### Key Points:
 
 1. **There IS a "Status" column** (Column G) in the `MLAVS_Attendance` sheet that marks presence.
